@@ -70,22 +70,25 @@ class DiffEngine:
 
     def _diff_fields(self, old_id: int, new_id: int, form_id: int) -> list[FieldChange]:
         """Compare decoded fields between two versions of a record."""
-        old_fields = {f.field_name: f.field_value
+        old_fields = {f.field_name: (f.field_value, f.field_type)
                       for f in self.store.get_decoded_fields(old_id, form_id)}
-        new_fields = {f.field_name: f.field_value
+        new_fields = {f.field_name: (f.field_value, f.field_type)
                       for f in self.new_store.get_decoded_fields(new_id, form_id)}
 
         changes = []
         all_names = sorted(set(old_fields.keys()) | set(new_fields.keys()))
         for name in all_names:
-            old_val = old_fields.get(name)
-            new_val = new_fields.get(name)
+            old_val, old_type = old_fields.get(name, (None, "str"))
+            new_val, new_type = new_fields.get(name, (None, "str"))
             if old_val != new_val:
+                # Prefer the new field_type; fall back to old
+                ft = new_type if new_val is not None else old_type
                 changes.append(FieldChange(
                     form_id=form_id,
                     field_name=name,
                     old_value=old_val,
                     new_value=new_val,
+                    field_type=ft,
                 ))
 
         return changes

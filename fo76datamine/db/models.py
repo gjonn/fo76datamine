@@ -82,3 +82,4 @@ class FieldChange:
     field_name: str
     old_value: Optional[str]
     new_value: Optional[str]
+    field_type: str = "str"
