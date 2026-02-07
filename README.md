@@ -10,13 +10,16 @@ A Python CLI tool that parses Fallout 76's game data files (`SeventySix.esm` + l
 - **Versioned snapshots** - Stores each parse in SQLite with SHA-256 hashes for change detection
 - **Diff engine** - Compares snapshots to find added, removed, and modified records with field-level detail (e.g., "damage: 50.0 -> 65.0")
 - **Unreleased content detection** - Heuristic scan for Atomic Shop items (ATX_), cut/test content (zzz_/CUT_/TEST_), high FormIDs, and disabled quests
+- **Item image extraction** - Extracts actual item textures from BA2 archives: workshop icons (3700+) and model diffuse textures via a NIF → BGSM → DDS pipeline
+- **HTML output with inline images** - Dark-themed HTML reports with clickable icon thumbnails that expand to full resolution in a lightbox
 - **Search** - Query by item name, editor ID, FormID, or record type
-- **Export** - CSV and JSON export with decoded fields
+- **Export** - CSV, JSON, markdown, and HTML export with decoded fields
 
 ## Requirements
 
 - Python 3.10+
 - click (installed automatically)
+- Pillow (installed automatically, used for DDS to PNG conversion)
 
 ## Installation
 
@@ -108,6 +111,7 @@ Filter by record type and change output format:
 
 ```
 fo76dm diff --latest --type WEAP --format markdown
+fo76dm diff --latest --format html -o diff.html
 ```
 
 If both snapshots have the same ESM hash, it warns you that the game data hasn't changed.
@@ -162,13 +166,14 @@ Compare specific snapshot IDs across databases (`--old` refers to the main DB, `
 fo76dm diff --old 3 --new 1 --vs pts
 ```
 
-All format options (`--format text|json|markdown`) and type filters (`--type WEAP`) work with cross-database diffs.
+All format options (`--format text|json|markdown|html`) and type filters (`--type WEAP`) work with cross-database diffs.
 
 Write diff output to a file with `--output` / `-o`:
 
 ```
 fo76dm diff --latest -o diff.txt
 fo76dm diff --latest --format markdown -o diff.md
+fo76dm diff --latest --format html -o diff.html
 ```
 
 ### Search records
@@ -178,6 +183,7 @@ fo76dm search "Stimpak" --type ALCH
 fo76dm search "Handmade" --type WEAP
 fo76dm search 0x00004822
 fo76dm search "" --edid "ATX_Weapon_*"
+fo76dm search "Fixer" --format html -o search.html
 ```
 
 ### Show record detail
@@ -208,6 +214,7 @@ Record 0x00004822
 
 ```
 fo76dm unreleased
+fo76dm unreleased --format html -o unreleased.html
 ```
 
 Scans for:
@@ -227,6 +234,7 @@ fo76dm strings search "Nuka"
 ```
 fo76dm export --format csv --type WEAP -o weapons.csv
 fo76dm export --format json --type AMMO
+fo76dm export --format html --type WEAP -o weapons.html
 ```
 
 ### Stats
@@ -302,6 +310,30 @@ The SQLite database path is derived from the `--esm` path — it goes up two dir
 | CONT | contained items and counts |
 | FLOR | harvest ingredient |
 
+## Item Images
+
+When writing to a file (`-o`), fo76dm extracts item images from the game's BA2 archives and saves them alongside the output. Use `--no-icons` to skip extraction.
+
+```
+fo76dm unreleased --format html -o unreleased.html    # icons/ and icons/full/ created next to output
+fo76dm diff --latest --no-icons -o diff.html           # skip icon extraction
+```
+
+Two sizes are produced:
+
+| Directory | Size | Purpose |
+|-----------|------|---------|
+| `icons/` | 128x128 | Thumbnails shown in tables |
+| `icons/full/` | Native resolution | Loaded on click in HTML lightbox |
+
+**Two-tier extraction pipeline:**
+
+1. **WorkshopIcons BA2** (fast) — Pre-rendered item images stored by FormID. Covers ~3700 buildable/Atomic Shop items. Extracted from `SeventySix - WorkshopIcons.ba2` (GNRL format).
+
+2. **Model texture fallback** (slower) — For items without a workshop icon, follows the model's material chain: MODL subrecord → `.nif` mesh (from Meshes BA2) → `.bgsm` material (from Materials BA2) → diffuse texture `_d.dds` (from Textures BA2, DX10 format). Parses NIF string tables and BGSM headers to resolve the chain.
+
+In HTML output, clicking any thumbnail opens a lightbox overlay showing the full-resolution image. Press Escape or click the backdrop to close.
+
 ## How It Works
 
 Custom pure-Python parser for Fallout 76's ESM format (version 208). No external Bethesda modding libraries are used since none support FO76's format.
@@ -311,3 +343,6 @@ Custom pure-Python parser for Fallout 76's ESM format (version 208). No external
 - **Compression**: zlib for records with flag `0x00040000` (mainly NPC_ records)
 - **Skipped types**: REFR (5.1M placement refs), NAVM, ACHR - not useful for datamining
 - **Localization**: Strings stored in separate `.strings`/`.dlstrings`/`.ilstrings` files inside the Localization BA2 archive (BTDX v1 GNRL format)
+- **BA2 formats**: GNRL (general files — meshes, materials, workshop icons) and DX10 (textures with chunk-based mip levels and zlib compression)
+- **NIF parsing**: Reads Gamebryo NIF headers (version 20.2.0.7, BS stream 155) to extract material paths from the string table
+- **BGSM parsing**: Reads Bethesda material files to extract the diffuse texture path (first length-prefixed string after the 60-byte header)

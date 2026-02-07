@@ -51,6 +51,30 @@ class Context:
 pass_ctx = click.make_pass_decorator(Context)
 
 
+def _extract_icons_for_form_ids(
+    esm_path: Path,
+    store,
+    snapshot_id: int,
+    form_ids: list[int],
+    output_dir: Path,
+    max_size: int = 128,
+) -> dict[int, Optional[str]]:
+    """Extract icons for a list of form_ids, printing progress."""
+    if not form_ids:
+        return {}
+
+    from fo76datamine.ba2.icons import IconExtractor
+
+    click.echo("Extracting item icons...", nl=False)
+    t0 = time.perf_counter()
+    extractor = IconExtractor(esm_path)
+    icon_map = extractor.extract_icons(store, snapshot_id, form_ids, output_dir, max_size=max_size)
+    elapsed = time.perf_counter() - t0
+    count = sum(1 for v in icon_map.values() if v is not None)
+    click.echo(f" {count} icons in {elapsed:.1f}s")
+    return icon_map
+
+
 @click.group()
 @click.option(
     "--esm", required=False, default=None,
@@ -303,7 +327,7 @@ def list_snapshots(ctx: Context):
 @click.option("--old", "old_id", type=int, help="Old snapshot ID")
 @click.option("--new", "new_id", type=int, help="New snapshot ID")
 @click.option("--type", "record_type", help="Filter by record type (e.g., WEAP)")
-@click.option("--format", "fmt", type=click.Choice(["text", "json", "markdown"]), default="text")
+@click.option("--format", "fmt", type=click.Choice(["text", "json", "markdown", "html"]), default="text")
 @click.option("--other-esm", "other_esm",
               type=click.Path(exists=True, dir_okay=False, path_type=Path),
               default=None,
@@ -312,10 +336,12 @@ def list_snapshots(ctx: Context):
               help="Profile name for cross-database diff (alternative to --other-esm)")
 @click.option("--output", "-o", "output_path", type=click.Path(), default=None,
               help="Write diff output to a file instead of stdout")
+@click.option("--icons/--no-icons", default=True,
+              help="Extract item icons to disk (default: enabled)")
 @pass_ctx
 def diff(ctx: Context, latest: bool, old_id: Optional[int], new_id: Optional[int],
          record_type: Optional[str], fmt: str, other_esm: Optional[Path],
-         vs_profile: Optional[str], output_path: Optional[str]):
+         vs_profile: Optional[str], output_path: Optional[str], icons: bool):
     """Compare two snapshots to find added/removed/modified records."""
     from fo76datamine.db.store import Store
     from fo76datamine.diff.engine import DiffEngine
@@ -388,7 +414,30 @@ def diff(ctx: Context, latest: bool, old_id: Optional[int], new_id: Optional[int
     engine = DiffEngine(store, new_store=new_store)
     result = engine.compare(old_id, new_id, record_type=record_type)
 
-    output = format_diff(result, store, old_id, new_id, fmt=fmt, new_store=new_store)
+    # Extract icons when writing to file (any format)
+    icon_map = None
+    if icons and output_path:
+        out_dir = Path(output_path).parent
+        # Collect all form_ids from diff result
+        all_fids = []
+        # Added + modified use new snapshot
+        new_fids = [r.form_id for r in result.added]
+        new_fids += [new_rec.form_id for _, new_rec in result.modified]
+        # Removed use old snapshot
+        old_fids = [r.form_id for r in result.removed]
+
+        icon_map = {}
+        # For cross-DB diffs, new items come from the other ESM's BA2 archives
+        new_esm = other_esm if other_esm is not None else ctx.esm
+        if new_fids:
+            icon_map.update(_extract_icons_for_form_ids(
+                new_esm, ns, new_id, new_fids, out_dir))
+        if old_fids:
+            icon_map.update(_extract_icons_for_form_ids(
+                ctx.esm, store, old_id, old_fids, out_dir))
+
+    output = format_diff(result, store, old_id, new_id, fmt=fmt,
+                         new_store=new_store, icon_map=icon_map)
     if output_path:
         Path(output_path).write_text(output, encoding="utf-8")
         click.echo(f"Diff written to {output_path}")
@@ -405,9 +454,14 @@ def diff(ctx: Context, latest: bool, old_id: Optional[int], new_id: Optional[int
 @click.option("--type", "record_type", help="Filter by record type (e.g., WEAP)")
 @click.option("--edid", help="Filter by editor ID pattern (supports * wildcards)")
 @click.option("--snapshot", "snapshot_id", type=int, help="Snapshot ID (default: latest)")
+@click.option("--format", "fmt", type=click.Choice(["text", "markdown", "html"]), default="text")
+@click.option("--icons/--no-icons", default=True,
+              help="Extract and embed item icons in markdown/html output (default: enabled)")
+@click.option("--output", "-o", "output_path", type=click.Path(), default=None,
+              help="Write output to a file instead of stdout")
 @pass_ctx
 def search(ctx: Context, query: str, record_type: Optional[str], edid: Optional[str],
-           snapshot_id: Optional[int]):
+           snapshot_id: Optional[int], fmt: str, icons: bool, output_path: Optional[str]):
     """Search records by name, editor ID, or FormID."""
     from fo76datamine.db.store import Store
 
@@ -428,23 +482,117 @@ def search(ctx: Context, query: str, record_type: Optional[str], edid: Optional[
         store.close()
         return
 
-    click.echo(f"Found {len(results)} records:\n")
-    click.echo(f"{'FormID':<12}  {'Type':<6}  {'Editor ID':<40}  {'Name'}")
-    click.echo("-" * 90)
-    for rec in results:
-        name = rec.full_name or ""
-        edid_str = rec.editor_id or ""
-        click.echo(f"{rec.form_id_hex:<12}  {rec.record_type:<6}  {edid_str:<40}  {name}")
+    # Extract icons when writing to file (any format)
+    icon_map = None
+    if icons and output_path:
+        out_dir = Path(output_path).parent
+        form_ids = [r.form_id for r in results]
+        icon_map = _extract_icons_for_form_ids(
+            ctx.esm, store, snapshot_id, form_ids, out_dir)
 
-    # Show decoded fields for results
+    if fmt == "markdown":
+        lines = _format_search_markdown(results, store, snapshot_id, icon_map)
+        output = "\n".join(lines)
+    elif fmt == "html":
+        output = _format_search_html(results, store, snapshot_id, icon_map)
+    else:
+        output = None
+
+    if output is not None:
+        if output_path:
+            Path(output_path).write_text(output, encoding="utf-8")
+            click.echo(f"Search results written to {output_path}")
+        else:
+            click.echo(output)
+    else:
+        click.echo(f"Found {len(results)} records:\n")
+        click.echo(f"{'FormID':<12}  {'Type':<6}  {'Editor ID':<40}  {'Name'}")
+        click.echo("-" * 90)
+        for rec in results:
+            name = rec.full_name or ""
+            edid_str = rec.editor_id or ""
+            click.echo(f"{rec.form_id_hex:<12}  {rec.record_type:<6}  {edid_str:<40}  {name}")
+
+        # Show decoded fields for results
+        for rec in results[:10]:
+            fields = store.get_decoded_fields(snapshot_id, rec.form_id)
+            if fields:
+                click.echo(f"\n  {rec.form_id_hex} decoded fields:")
+                for f in fields:
+                    click.echo(f"    {f.field_name}: {f.field_value}")
+
+    store.close()
+
+
+def _format_search_markdown(results, store, snapshot_id, icon_map):
+    """Format search results as markdown with optional icons."""
+    lines = []
+    has_icons = icon_map is not None and len(icon_map) > 0
+
+    lines.append(f"# Search Results ({len(results)} records)")
+    lines.append("")
+    if has_icons:
+        lines.append("| Icon | FormID | Type | Editor ID | Name |")
+        lines.append("|------|--------|------|-----------|------|")
+    else:
+        lines.append("| FormID | Type | Editor ID | Name |")
+        lines.append("|--------|------|-----------|------|")
+
+    for rec in results:
+        if has_icons:
+            path = icon_map.get(rec.form_id)
+            icon = f"![icon]({path})" if path else ""
+            lines.append(f"| {icon} | {rec.form_id_hex} | {rec.record_type} | {rec.editor_id or ''} | {rec.full_name or ''} |")
+        else:
+            lines.append(f"| {rec.form_id_hex} | {rec.record_type} | {rec.editor_id or ''} | {rec.full_name or ''} |")
+
+    # Decoded fields for first 10 results
     for rec in results[:10]:
         fields = store.get_decoded_fields(snapshot_id, rec.form_id)
         if fields:
-            click.echo(f"\n  {rec.form_id_hex} decoded fields:")
+            lines.append("")
+            lines.append(f"### {rec.full_name or rec.editor_id or rec.form_id_hex} ({rec.form_id_hex})")
+            lines.append("| Field | Value |")
+            lines.append("|-------|-------|")
             for f in fields:
-                click.echo(f"    {f.field_name}: {f.field_value}")
+                if f.field_name not in ("icon", "icon_small"):
+                    lines.append(f"| {f.field_name} | {f.field_value} |")
 
-    store.close()
+    return lines
+
+
+def _format_search_html(results, store, snapshot_id, icon_map):
+    """Format search results as HTML with inline icons."""
+    from fo76datamine.diff.report import _esc, _html_icon, html_wrap
+
+    has_icons = icon_map is not None and any(v for v in icon_map.values())
+    parts = []
+    parts.append(f"<h1>Search Results ({len(results)} records)</h1>")
+
+    icon_hdr = "<th>Icon</th>" if has_icons else ""
+    parts.append(f"<table><tr>{icon_hdr}<th>FormID</th><th>Type</th><th>Editor ID</th><th>Name</th></tr>")
+    for rec in results:
+        icon_td = f"<td>{_html_icon(rec.form_id, icon_map)}</td>" if has_icons else ""
+        parts.append(
+            f"<tr>{icon_td}<td>{rec.form_id_hex}</td><td>{rec.record_type}</td>"
+            f"<td>{_esc(rec.editor_id)}</td><td>{_esc(rec.full_name)}</td></tr>"
+        )
+    parts.append("</table>")
+
+    # Decoded fields for first 10
+    for rec in results[:10]:
+        fields = store.get_decoded_fields(snapshot_id, rec.form_id)
+        if fields:
+            name = _esc(rec.full_name or rec.editor_id or rec.form_id_hex)
+            icon = _html_icon(rec.form_id, icon_map) if has_icons else ""
+            parts.append(f"<h3>{icon} {name} ({rec.form_id_hex})</h3>")
+            parts.append('<table class="change-table"><tr><th>Field</th><th>Value</th></tr>')
+            for f in fields:
+                if f.field_name not in ("icon", "icon_small"):
+                    parts.append(f"<tr><td>{_esc(f.field_name)}</td><td>{_esc(f.field_value)}</td></tr>")
+            parts.append("</table>")
+
+    return html_wrap("Search Results", "\n".join(parts))
 
 
 @cli.command()
@@ -500,8 +648,13 @@ def show(ctx: Context, form_id_str: str, snapshot_id: Optional[int]):
 
 
 @cli.command()
+@click.option("--format", "fmt", type=click.Choice(["text", "markdown", "html"]), default="text")
+@click.option("--icons/--no-icons", default=True,
+              help="Extract item icons to disk (default: enabled)")
+@click.option("--output", "-o", "output_path", type=click.Path(), default=None,
+              help="Write output to a file instead of stdout")
 @pass_ctx
-def unreleased(ctx: Context):
+def unreleased(ctx: Context, fmt: str, icons: bool, output_path: Optional[str]):
     """Scan for unreleased content using heuristics."""
     from fo76datamine.db.store import Store
     from fo76datamine.diff.filters import find_unreleased
@@ -516,19 +669,119 @@ def unreleased(ctx: Context):
     click.echo(f"Scanning snapshot #{snap.id} ({snap.label}) for unreleased content...\n")
     results = find_unreleased(store, snap.id)
 
-    for category, items in results.items():
-        if items:
-            click.echo(f"\n{'=' * 60}")
-            click.echo(f"  {category} ({len(items)} items)")
-            click.echo(f"{'=' * 60}")
-            for rec in items[:50]:
-                name = rec.full_name or ""
-                edid = rec.editor_id or ""
-                click.echo(f"  {rec.form_id_hex}  {rec.record_type:<6}  {edid:<45}  {name}")
-            if len(items) > 50:
-                click.echo(f"  ... and {len(items) - 50} more")
+    # Extract icons when writing to file (any format)
+    icon_map = None
+    if icons and output_path:
+        out_dir = Path(output_path).parent
+        all_fids = []
+        for items in results.values():
+            all_fids.extend(r.form_id for r in items)
+        if all_fids:
+            icon_map = _extract_icons_for_form_ids(
+                ctx.esm, store, snap.id, all_fids, out_dir)
+
+    if fmt == "markdown":
+        lines = _format_unreleased_markdown(results, icon_map)
+        output = "\n".join(lines)
+        if output_path:
+            Path(output_path).write_text(output, encoding="utf-8")
+            click.echo(f"Unreleased content written to {output_path}")
+        else:
+            click.echo(output)
+    elif fmt == "html":
+        output = _format_unreleased_html(results, icon_map)
+        if output_path:
+            Path(output_path).write_text(output, encoding="utf-8")
+            click.echo(f"Unreleased content written to {output_path}")
+        else:
+            click.echo(output)
+    else:
+        for category, items in results.items():
+            if items:
+                click.echo(f"\n{'=' * 60}")
+                click.echo(f"  {category} ({len(items)} items)")
+                click.echo(f"{'=' * 60}")
+                for rec in items[:50]:
+                    name = rec.full_name or ""
+                    edid = rec.editor_id or ""
+                    click.echo(f"  {rec.form_id_hex}  {rec.record_type:<6}  {edid:<45}  {name}")
+                if len(items) > 50:
+                    click.echo(f"  ... and {len(items) - 50} more")
 
     store.close()
+
+
+def _format_unreleased_markdown(results, icon_map):
+    """Format unreleased content as markdown with optional icons."""
+    lines = []
+    has_icons = icon_map is not None and len(icon_map) > 0
+
+    lines.append("# Unreleased Content")
+    lines.append("")
+
+    # Summary table
+    lines.append("| Category | Count |")
+    lines.append("|----------|-------|")
+    for category, items in results.items():
+        if items:
+            lines.append(f"| {category} | {len(items)} |")
+    lines.append("")
+
+    for category, items in results.items():
+        if not items:
+            continue
+        lines.append(f"## {category} ({len(items)} items)")
+        if has_icons:
+            lines.append("| Icon | FormID | Type | Editor ID | Name |")
+            lines.append("|------|--------|------|-----------|------|")
+        else:
+            lines.append("| FormID | Type | Editor ID | Name |")
+            lines.append("|--------|------|-----------|------|")
+
+        for rec in items[:100]:
+            if has_icons:
+                path = icon_map.get(rec.form_id)
+                icon = f"![icon]({path})" if path else ""
+                lines.append(f"| {icon} | {rec.form_id_hex} | {rec.record_type} | {rec.editor_id or ''} | {rec.full_name or ''} |")
+            else:
+                lines.append(f"| {rec.form_id_hex} | {rec.record_type} | {rec.editor_id or ''} | {rec.full_name or ''} |")
+        lines.append("")
+
+    return lines
+
+
+def _format_unreleased_html(results, icon_map):
+    """Format unreleased content as HTML with inline icons."""
+    from fo76datamine.diff.report import _esc, _html_icon, html_wrap
+
+    has_icons = icon_map is not None and any(v for v in icon_map.values())
+    parts = []
+    parts.append("<h1>Unreleased Content</h1>")
+
+    # Summary
+    parts.append('<div class="summary">')
+    total = sum(len(items) for items in results.values())
+    parts.append(f'<div class="stat"><div class="label">Total Items</div><div class="value">{total}</div></div>')
+    for category, items in results.items():
+        if items:
+            parts.append(f'<div class="stat"><div class="label">{_esc(category)}</div><div class="value">{len(items)}</div></div>')
+    parts.append('</div>')
+
+    for category, items in results.items():
+        if not items:
+            continue
+        parts.append(f"<h2>{_esc(category)} ({len(items)} items)</h2>")
+        icon_hdr = "<th>Icon</th>" if has_icons else ""
+        parts.append(f"<table><tr>{icon_hdr}<th>FormID</th><th>Type</th><th>Editor ID</th><th>Name</th></tr>")
+        for rec in items[:500]:
+            icon_td = f"<td>{_html_icon(rec.form_id, icon_map)}</td>" if has_icons else ""
+            parts.append(
+                f"<tr>{icon_td}<td>{rec.form_id_hex}</td><td>{rec.record_type}</td>"
+                f"<td>{_esc(rec.editor_id)}</td><td>{_esc(rec.full_name)}</td></tr>"
+            )
+        parts.append("</table>")
+
+    return html_wrap("Unreleased Content", "\n".join(parts))
 
 
 @cli.command()
@@ -596,14 +849,16 @@ def strings_search(ctx: Context, query: str, snapshot_id: Optional[int]):
 
 
 @cli.command()
-@click.option("--format", "fmt", type=click.Choice(["csv", "json"]), required=True)
+@click.option("--format", "fmt", type=click.Choice(["csv", "json", "markdown", "html"]), required=True)
 @click.option("--type", "record_type", help="Record type to export (e.g., WEAP)")
 @click.option("--snapshot", "snapshot_id", type=int, help="Snapshot ID (default: latest)")
 @click.option("--output", "-o", type=click.Path(), help="Output file path")
+@click.option("--icons/--no-icons", default=True,
+              help="Extract item icons to disk (default: enabled)")
 @pass_ctx
 def export(ctx: Context, fmt: str, record_type: Optional[str], snapshot_id: Optional[int],
-           output: Optional[str]):
-    """Export records as CSV or JSON."""
+           output: Optional[str], icons: bool):
+    """Export records as CSV, JSON, or markdown."""
     from fo76datamine.db.store import Store
 
     store = Store(ctx.db)
@@ -616,12 +871,35 @@ def export(ctx: Context, fmt: str, record_type: Optional[str], snapshot_id: Opti
             return
         snapshot_id = snap.id
 
+    # Extract icons when writing to file (any format)
+    icon_map = None
+    if icons and output:
+        from fo76datamine.db.models import DbRecord
+        if record_type:
+            recs = store.get_records_by_type(snapshot_id, record_type)
+        else:
+            cur = store.conn.execute(
+                "SELECT snapshot_id, form_id, record_type, editor_id, full_name, full_name_id, "
+                "desc_text, desc_id, data_hash, flags, data_size "
+                "FROM records WHERE snapshot_id=? ORDER BY record_type, form_id",
+                (snapshot_id,),
+            )
+            recs = [DbRecord(*row) for row in cur.fetchall()]
+        form_ids = [r.form_id for r in recs]
+        icon_map = _extract_icons_for_form_ids(ctx.esm, store, snapshot_id, form_ids, Path(output).parent)
+    else:
+        recs = None
+
     if fmt == "csv":
         from fo76datamine.export.csv_export import export_csv
         data = export_csv(store, snapshot_id, record_type)
-    else:
+    elif fmt == "json":
         from fo76datamine.export.json_export import export_json
         data = export_json(store, snapshot_id, record_type)
+    elif fmt == "html":
+        data = _export_html(store, snapshot_id, record_type, icon_map, recs)
+    else:  # markdown
+        data = _export_markdown(store, snapshot_id, record_type, icon_map, recs)
 
     if output:
         Path(output).write_text(data, encoding="utf-8")
@@ -630,6 +908,79 @@ def export(ctx: Context, fmt: str, record_type: Optional[str], snapshot_id: Opti
         click.echo(data)
 
     store.close()
+
+
+def _get_export_records(store, snapshot_id, record_type):
+    """Fetch records for export if not already loaded."""
+    from fo76datamine.db.models import DbRecord
+    if record_type:
+        return store.get_records_by_type(snapshot_id, record_type)
+    cur = store.conn.execute(
+        "SELECT snapshot_id, form_id, record_type, editor_id, full_name, full_name_id, "
+        "desc_text, desc_id, data_hash, flags, data_size "
+        "FROM records WHERE snapshot_id=? ORDER BY record_type, form_id",
+        (snapshot_id,),
+    )
+    return [DbRecord(*row) for row in cur.fetchall()]
+
+
+def _export_markdown(store, snapshot_id, record_type, icon_map, records=None):
+    """Export records as markdown with optional icons."""
+    if records is None:
+        records = _get_export_records(store, snapshot_id, record_type)
+
+    has_icons = icon_map is not None and len(icon_map) > 0
+    lines = []
+    title = f"Export: {record_type}" if record_type else "Export: All Records"
+    lines.append(f"# {title}")
+    lines.append(f"")
+    lines.append(f"Total: {len(records)} records")
+    lines.append("")
+
+    if has_icons:
+        lines.append("| Icon | FormID | Type | Editor ID | Name |")
+        lines.append("|------|--------|------|-----------|------|")
+    else:
+        lines.append("| FormID | Type | Editor ID | Name |")
+        lines.append("|--------|------|-----------|------|")
+
+    for rec in records:
+        if has_icons:
+            path = icon_map.get(rec.form_id)
+            icon = f"![icon]({path})" if path else ""
+            lines.append(f"| {icon} | {rec.form_id_hex} | {rec.record_type} | {rec.editor_id or ''} | {rec.full_name or ''} |")
+        else:
+            lines.append(f"| {rec.form_id_hex} | {rec.record_type} | {rec.editor_id or ''} | {rec.full_name or ''} |")
+
+    return "\n".join(lines)
+
+
+def _export_html(store, snapshot_id, record_type, icon_map, records=None):
+    """Export records as HTML with inline icons."""
+    from fo76datamine.diff.report import _esc, _html_icon, html_wrap
+
+    if records is None:
+        records = _get_export_records(store, snapshot_id, record_type)
+
+    has_icons = icon_map is not None and any(v for v in icon_map.values())
+    parts = []
+    title = f"Export: {record_type}" if record_type else "Export: All Records"
+    parts.append(f"<h1>{_esc(title)}</h1>")
+    parts.append(f"<p>Total: {len(records)} records</p>")
+
+    icon_hdr = "<th>Icon</th>" if has_icons else ""
+    parts.append(f"<table><tr>{icon_hdr}<th>FormID</th><th>Type</th><th>Editor ID</th><th>Name</th></tr>")
+    for rec in records[:5000]:
+        icon_td = f"<td>{_html_icon(rec.form_id, icon_map)}</td>" if has_icons else ""
+        parts.append(
+            f"<tr>{icon_td}<td>{rec.form_id_hex}</td><td>{rec.record_type}</td>"
+            f"<td>{_esc(rec.editor_id)}</td><td>{_esc(rec.full_name)}</td></tr>"
+        )
+    if len(records) > 5000:
+        parts.append(f'<tr><td colspan="5">... and {len(records) - 5000} more</td></tr>')
+    parts.append("</table>")
+
+    return html_wrap(title, "\n".join(parts))
 
 
 @cli.command()

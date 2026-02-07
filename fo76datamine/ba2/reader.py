@@ -27,6 +27,7 @@ class BA2Reader:
     def __init__(self, path: Path):
         self.path = path
         self.entries: list[BA2FileEntry] = []
+        self._name_index: Optional[dict[str, BA2FileEntry]] = None
         self._parse_header()
 
     def _parse_header(self):
@@ -68,6 +69,15 @@ class BA2Reader:
                 return zlib.decompress(compressed)
             else:
                 return f.read(entry.unpacked_size)
+
+    def _build_name_index(self):
+        if self._name_index is None:
+            self._name_index = {e.name.lower(): e for e in self.entries}
+
+    def find_by_path(self, path: str) -> Optional[BA2FileEntry]:
+        """Find entry by exact path (case-insensitive, forward slashes)."""
+        self._build_name_index()
+        return self._name_index.get(path.lower().replace("\\", "/"))
 
     def find(self, name_fragment: str) -> Optional[BA2FileEntry]:
         """Find first entry whose name contains the fragment (case-insensitive)."""

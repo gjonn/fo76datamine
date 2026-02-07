@@ -202,6 +202,43 @@ class Store:
         )
         return [DbRecord(*row) for row in cur.fetchall()]
 
+    def get_icon_paths(self, snapshot_id: int, form_ids: list[int]) -> dict[int, str]:
+        """Batch-fetch icon texture paths for given form_ids."""
+        if not form_ids:
+            return {}
+        result = {}
+        # Query in batches to avoid SQLite variable limits
+        batch_size = 500
+        for i in range(0, len(form_ids), batch_size):
+            batch = form_ids[i:i + batch_size]
+            placeholders = ",".join("?" * len(batch))
+            cur = self.conn.execute(
+                f"SELECT form_id, field_value FROM decoded_fields "
+                f"WHERE snapshot_id=? AND field_name='icon' AND form_id IN ({placeholders})",
+                [snapshot_id, *batch],
+            )
+            for row in cur:
+                result[row[0]] = row[1]
+        return result
+
+    def get_model_paths(self, snapshot_id: int, form_ids: list[int]) -> dict[int, str]:
+        """Batch-fetch model (.nif) paths for given form_ids."""
+        if not form_ids:
+            return {}
+        result = {}
+        batch_size = 500
+        for i in range(0, len(form_ids), batch_size):
+            batch = form_ids[i:i + batch_size]
+            placeholders = ",".join("?" * len(batch))
+            cur = self.conn.execute(
+                f"SELECT form_id, field_value FROM decoded_fields "
+                f"WHERE snapshot_id=? AND field_name='model' AND form_id IN ({placeholders})",
+                [snapshot_id, *batch],
+            )
+            for row in cur:
+                result[row[0]] = row[1]
+        return result
+
     def get_decoded_fields(self, snapshot_id: int, form_id: int) -> list[DecodedField]:
         cur = self.conn.execute(
             "SELECT snapshot_id, form_id, field_name, field_value, field_type "
