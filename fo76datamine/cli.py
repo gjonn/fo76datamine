@@ -53,8 +53,6 @@ pass_ctx = click.make_pass_decorator(Context)
 
 def _extract_icons_for_form_ids(
     esm_path: Path,
-    store,
-    snapshot_id: int,
     form_ids: list[int],
     output_dir: Path,
     max_size: int = 128,
@@ -68,7 +66,7 @@ def _extract_icons_for_form_ids(
     click.echo("Extracting item icons...", nl=False)
     t0 = time.perf_counter()
     extractor = IconExtractor(esm_path)
-    icon_map = extractor.extract_icons(store, snapshot_id, form_ids, output_dir, max_size=max_size)
+    icon_map = extractor.extract_icons(form_ids, output_dir, max_size=max_size)
     elapsed = time.perf_counter() - t0
     count = sum(1 for v in icon_map.values() if v is not None)
     click.echo(f" {count} icons in {elapsed:.1f}s")
@@ -431,10 +429,10 @@ def diff(ctx: Context, latest: bool, old_id: Optional[int], new_id: Optional[int
         new_esm = other_esm if other_esm is not None else ctx.esm
         if new_fids:
             icon_map.update(_extract_icons_for_form_ids(
-                new_esm, ns, new_id, new_fids, out_dir))
+                new_esm, new_fids, out_dir))
         if old_fids:
             icon_map.update(_extract_icons_for_form_ids(
-                ctx.esm, store, old_id, old_fids, out_dir))
+                ctx.esm, old_fids, out_dir))
 
     output = format_diff(result, store, old_id, new_id, fmt=fmt,
                          new_store=new_store, icon_map=icon_map)
@@ -456,12 +454,13 @@ def diff(ctx: Context, latest: bool, old_id: Optional[int], new_id: Optional[int
 @click.option("--snapshot", "snapshot_id", type=int, help="Snapshot ID (default: latest)")
 @click.option("--format", "fmt", type=click.Choice(["text", "markdown", "html"]), default="text")
 @click.option("--icons/--no-icons", default=True,
-              help="Extract and embed item icons in markdown/html output (default: enabled)")
+              help="Extract item icons to disk (default: enabled)")
 @click.option("--output", "-o", "output_path", type=click.Path(), default=None,
               help="Write output to a file instead of stdout")
 @pass_ctx
 def search(ctx: Context, query: str, record_type: Optional[str], edid: Optional[str],
-           snapshot_id: Optional[int], fmt: str, icons: bool, output_path: Optional[str]):
+           snapshot_id: Optional[int], fmt: str, icons: bool,
+           output_path: Optional[str]):
     """Search records by name, editor ID, or FormID."""
     from fo76datamine.db.store import Store
 
@@ -488,7 +487,7 @@ def search(ctx: Context, query: str, record_type: Optional[str], edid: Optional[
         out_dir = Path(output_path).parent
         form_ids = [r.form_id for r in results]
         icon_map = _extract_icons_for_form_ids(
-            ctx.esm, store, snapshot_id, form_ids, out_dir)
+            ctx.esm, form_ids, out_dir)
 
     if fmt == "markdown":
         lines = _format_search_markdown(results, store, snapshot_id, icon_map)
@@ -678,7 +677,7 @@ def unreleased(ctx: Context, fmt: str, icons: bool, output_path: Optional[str]):
             all_fids.extend(r.form_id for r in items)
         if all_fids:
             icon_map = _extract_icons_for_form_ids(
-                ctx.esm, store, snap.id, all_fids, out_dir)
+                ctx.esm, all_fids, out_dir)
 
     if fmt == "markdown":
         lines = _format_unreleased_markdown(results, icon_map)
@@ -886,7 +885,7 @@ def export(ctx: Context, fmt: str, record_type: Optional[str], snapshot_id: Opti
             )
             recs = [DbRecord(*row) for row in cur.fetchall()]
         form_ids = [r.form_id for r in recs]
-        icon_map = _extract_icons_for_form_ids(ctx.esm, store, snapshot_id, form_ids, Path(output).parent)
+        icon_map = _extract_icons_for_form_ids(ctx.esm, form_ids, Path(output).parent)
     else:
         recs = None
 
