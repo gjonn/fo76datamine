@@ -239,6 +239,27 @@ class Store:
                 result[row[0]] = row[1]
         return result
 
+    def get_formid_refs(self, snapshot_id: int) -> dict[int, list[tuple[str, int]]]:
+        """Bulk-fetch all formid-typed fields for a snapshot.
+
+        Returns {source_form_id: [(field_name, target_form_id), ...]}.
+        """
+        cur = self.conn.execute(
+            "SELECT form_id, field_name, field_value FROM decoded_fields "
+            "WHERE snapshot_id=? AND field_type='formid'",
+            (snapshot_id,),
+        )
+        result: dict[int, list[tuple[str, int]]] = {}
+        for form_id, field_name, field_value in cur:
+            try:
+                target_fid = int(field_value, 16)
+            except (ValueError, TypeError):
+                continue
+            if target_fid == 0:
+                continue
+            result.setdefault(form_id, []).append((field_name, target_fid))
+        return result
+
     def get_decoded_fields(self, snapshot_id: int, form_id: int) -> list[DecodedField]:
         cur = self.conn.execute(
             "SELECT snapshot_id, form_id, field_name, field_value, field_type "

@@ -108,7 +108,9 @@ TYPE_NAMES: dict[str, str] = {
 DECODABLE_TYPES = frozenset({
     "WEAP", "ARMO", "ALCH", "NPC_", "QUST", "COBJ", "AMMO",
     "MISC", "BOOK", "FLOR", "GMST", "GLOB", "PERK", "ENCH",
-    "MGEF", "KEYM", "CONT",
+    "MGEF", "KEYM", "CONT", "SPEL", "OMOD", "FACT", "RACE",
+    "TERM", "LVLI", "LVLN", "AVIF", "ACTI", "LSCR", "MESG",
+    "FURN",
 })
 
 def type_name(rec_type: str) -> str:

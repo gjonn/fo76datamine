@@ -513,12 +513,14 @@ def search(ctx: Context, query: str, record_type: Optional[str], edid: Optional[
             click.echo(f"{rec.form_id_hex:<12}  {rec.record_type:<6}  {edid_str:<40}  {name}")
 
         # Show decoded fields for results
+        from fo76datamine.db.resolve import FormIDResolver
+        resolver = FormIDResolver(store, snapshot_id)
         for rec in results[:10]:
             fields = store.get_decoded_fields(snapshot_id, rec.form_id)
             if fields:
                 click.echo(f"\n  {rec.form_id_hex} decoded fields:")
                 for f in fields:
-                    click.echo(f"    {f.field_name}: {f.field_value}")
+                    click.echo(f"    {f.field_name}: {resolver.format_field_value(f)}")
 
     store.close()
 
@@ -546,6 +548,8 @@ def _format_search_markdown(results, store, snapshot_id, icon_map):
             lines.append(f"| {rec.form_id_hex} | {rec.record_type} | {rec.editor_id or ''} | {rec.full_name or ''} |")
 
     # Decoded fields for first 10 results
+    from fo76datamine.db.resolve import FormIDResolver
+    resolver = FormIDResolver(store, snapshot_id)
     for rec in results[:10]:
         fields = store.get_decoded_fields(snapshot_id, rec.form_id)
         if fields:
@@ -555,41 +559,53 @@ def _format_search_markdown(results, store, snapshot_id, icon_map):
             lines.append("|-------|-------|")
             for f in fields:
                 if f.field_name not in ("icon", "icon_small"):
-                    lines.append(f"| {f.field_name} | {f.field_value} |")
+                    lines.append(f"| {f.field_name} | {resolver.format_field_value(f)} |")
 
     return lines
 
 
 def _format_search_html(results, store, snapshot_id, icon_map):
     """Format search results as HTML with inline icons."""
-    from fo76datamine.diff.report import _esc, _html_icon, html_wrap
+    from fo76datamine.diff.report import _esc, _html_icon, _badge, html_wrap
 
     has_icons = icon_map is not None and any(v for v in icon_map.values())
     parts = []
     parts.append(f"<h1>Search Results ({len(results)} records)</h1>")
 
+    def _sortable_th(label):
+        return f'<th data-sortable>{label}<span class="sort-arrow"></span></th>'
+
     icon_hdr = "<th>Icon</th>" if has_icons else ""
-    parts.append(f"<table><tr>{icon_hdr}<th>FormID</th><th>Type</th><th>Editor ID</th><th>Name</th></tr>")
+    parts.append('<div class="filterable" id="tbl-search">')
+    parts.append('<div class="table-filter"><input type="text" placeholder="Filter rows...">'
+                 '<span class="count"></span></div>')
+    parts.append(f"<table><thead><tr>{icon_hdr}"
+                 f"{_sortable_th('FormID')}{_sortable_th('Type')}"
+                 f"{_sortable_th('Editor ID')}{_sortable_th('Name')}"
+                 f"</tr></thead><tbody>")
     for rec in results:
         icon_td = f"<td>{_html_icon(rec.form_id, icon_map)}</td>" if has_icons else ""
         parts.append(
-            f"<tr>{icon_td}<td>{rec.form_id_hex}</td><td>{rec.record_type}</td>"
+            f"<tr>{icon_td}<td>{rec.form_id_hex}</td><td>{_badge(rec.record_type)}</td>"
             f"<td>{_esc(rec.editor_id)}</td><td>{_esc(rec.full_name)}</td></tr>"
         )
-    parts.append("</table>")
+    parts.append("</tbody></table></div>")
 
-    # Decoded fields for first 10
-    for rec in results[:10]:
+    # Decoded fields for first 10 as collapsible details
+    from fo76datamine.db.resolve import FormIDResolver
+    resolver = FormIDResolver(store, snapshot_id)
+    for idx, rec in enumerate(results[:10]):
         fields = store.get_decoded_fields(snapshot_id, rec.form_id)
         if fields:
             name = _esc(rec.full_name or rec.editor_id or rec.form_id_hex)
             icon = _html_icon(rec.form_id, icon_map) if has_icons else ""
-            parts.append(f"<h3>{icon} {name} ({rec.form_id_hex})</h3>")
-            parts.append('<table class="change-table"><tr><th>Field</th><th>Value</th></tr>')
+            parts.append(f'<h3 class="section-header">{icon} {name} ({rec.form_id_hex})</h3>')
+            parts.append(f'<div class="section-body">')
+            parts.append('<table class="change-table"><thead><tr><th>Field</th><th>Value</th></tr></thead><tbody>')
             for f in fields:
                 if f.field_name not in ("icon", "icon_small"):
-                    parts.append(f"<tr><td>{_esc(f.field_name)}</td><td>{_esc(f.field_value)}</td></tr>")
-            parts.append("</table>")
+                    parts.append(f"<tr><td>{_esc(f.field_name)}</td><td>{_esc(resolver.format_field_value(f))}</td></tr>")
+            parts.append("</tbody></table></div>")
 
     return html_wrap("Search Results", "\n".join(parts))
 
@@ -597,8 +613,9 @@ def _format_search_html(results, store, snapshot_id, icon_map):
 @cli.command()
 @click.argument("form_id_str")
 @click.option("--snapshot", "snapshot_id", type=int, help="Snapshot ID (default: latest)")
+@click.option("--expand", is_flag=True, help="Expand leveled list entries into a tree")
 @pass_ctx
-def show(ctx: Context, form_id_str: str, snapshot_id: Optional[int]):
+def show(ctx: Context, form_id_str: str, snapshot_id: Optional[int], expand: bool):
     """Show full record detail for a FormID (hex or decimal)."""
     from fo76datamine.db.store import Store
 
@@ -639,9 +656,20 @@ def show(ctx: Context, form_id_str: str, snapshot_id: Optional[int]):
     # Show decoded fields
     fields = store.get_decoded_fields(snapshot_id, form_id)
     if fields:
+        from fo76datamine.db.resolve import FormIDResolver
+        resolver = FormIDResolver(store, snapshot_id)
         click.echo(f"\n  Decoded Fields:")
         for f in fields:
-            click.echo(f"    {f.field_name:<25} = {f.field_value} ({f.field_type})")
+            display_val = resolver.format_field_value(f)
+            click.echo(f"    {f.field_name:<25} = {display_val} ({f.field_type})")
+
+    # Expand leveled list tree if requested
+    if expand and rec.record_type in ("LVLI", "LVLN"):
+        from fo76datamine.db.leveled_list import expand_leveled_list, format_tree_text
+        tree = expand_leveled_list(store, snapshot_id, form_id)
+        if tree:
+            click.echo(f"\n  Leveled List Tree:")
+            click.echo(format_tree_text(tree))
 
     store.close()
 
@@ -751,34 +779,61 @@ def _format_unreleased_markdown(results, icon_map):
 
 def _format_unreleased_html(results, icon_map):
     """Format unreleased content as HTML with inline icons."""
-    from fo76datamine.diff.report import _esc, _html_icon, html_wrap
+    from fo76datamine.diff.report import _esc, _html_icon, _badge, html_wrap
 
     has_icons = icon_map is not None and any(v for v in icon_map.values())
     parts = []
-    parts.append("<h1>Unreleased Content</h1>")
+
+    def _sortable_th(label):
+        return f'<th data-sortable>{label}<span class="sort-arrow"></span></th>'
+
+    # --- TOC sidebar ---
+    categories_with_items = [(cat, items) for cat, items in results.items() if items]
+    toc = ['<nav class="toc"><h3>Contents</h3>']
+    toc.append('<a href="#summary">Summary</a>')
+    for cat, items in categories_with_items:
+        safe_id = cat.replace(" ", "-").lower()
+        toc.append(f'<a href="#cat-{safe_id}">{_esc(cat)} ({len(items)})</a>')
+    toc.append('</nav>')
+    parts.append("\n".join(toc))
+
+    parts.append('<h1 id="summary">Unreleased Content</h1>')
 
     # Summary
     parts.append('<div class="summary">')
     total = sum(len(items) for items in results.values())
     parts.append(f'<div class="stat"><div class="label">Total Items</div><div class="value">{total}</div></div>')
-    for category, items in results.items():
-        if items:
-            parts.append(f'<div class="stat"><div class="label">{_esc(category)}</div><div class="value">{len(items)}</div></div>')
+    for category, items in categories_with_items:
+        parts.append(f'<div class="stat"><div class="label">{_esc(category)}</div><div class="value">{len(items)}</div></div>')
     parts.append('</div>')
 
-    for category, items in results.items():
-        if not items:
-            continue
-        parts.append(f"<h2>{_esc(category)} ({len(items)} items)</h2>")
+    for cat_idx, (category, items) in enumerate(categories_with_items):
+        safe_id = category.replace(" ", "-").lower()
+        parts.append(f'<h2 class="section-header" id="cat-{safe_id}">{_esc(category)} ({len(items)} items)</h2>')
+        parts.append('<div class="section-body">')
+
+        limit = 500
+        truncated = len(items) > limit
+        display = items[:limit]
+
         icon_hdr = "<th>Icon</th>" if has_icons else ""
-        parts.append(f"<table><tr>{icon_hdr}<th>FormID</th><th>Type</th><th>Editor ID</th><th>Name</th></tr>")
-        for rec in items[:500]:
+        parts.append(f'<div class="filterable" id="tbl-unrel-{cat_idx}">')
+        parts.append('<div class="table-filter"><input type="text" placeholder="Filter rows...">'
+                     '<span class="count"></span></div>')
+        if truncated:
+            parts.append(f'<div class="truncation-notice">Showing {limit} of {len(items)} records.</div>')
+        parts.append(f"<table><thead><tr>{icon_hdr}"
+                     f"{_sortable_th('FormID')}{_sortable_th('Type')}"
+                     f"{_sortable_th('Editor ID')}{_sortable_th('Name')}"
+                     f"</tr></thead><tbody>")
+        for rec in display:
             icon_td = f"<td>{_html_icon(rec.form_id, icon_map)}</td>" if has_icons else ""
             parts.append(
-                f"<tr>{icon_td}<td>{rec.form_id_hex}</td><td>{rec.record_type}</td>"
+                f"<tr>{icon_td}<td>{rec.form_id_hex}</td><td>{_badge(rec.record_type)}</td>"
                 f"<td>{_esc(rec.editor_id)}</td><td>{_esc(rec.full_name)}</td></tr>"
             )
-        parts.append("</table>")
+        parts.append("</tbody></table></div>")
+        parts.append('</div>')
 
     return html_wrap("Unreleased Content", "\n".join(parts))
 
@@ -956,7 +1011,7 @@ def _export_markdown(store, snapshot_id, record_type, icon_map, records=None):
 
 def _export_html(store, snapshot_id, record_type, icon_map, records=None):
     """Export records as HTML with inline icons."""
-    from fo76datamine.diff.report import _esc, _html_icon, html_wrap
+    from fo76datamine.diff.report import _esc, _html_icon, _badge, html_wrap
 
     if records is None:
         records = _get_export_records(store, snapshot_id, record_type)
@@ -967,17 +1022,30 @@ def _export_html(store, snapshot_id, record_type, icon_map, records=None):
     parts.append(f"<h1>{_esc(title)}</h1>")
     parts.append(f"<p>Total: {len(records)} records</p>")
 
+    def _sortable_th(label):
+        return f'<th data-sortable>{label}<span class="sort-arrow"></span></th>'
+
+    limit = 5000
+    truncated = len(records) > limit
+    display = records[:limit]
+
     icon_hdr = "<th>Icon</th>" if has_icons else ""
-    parts.append(f"<table><tr>{icon_hdr}<th>FormID</th><th>Type</th><th>Editor ID</th><th>Name</th></tr>")
-    for rec in records[:5000]:
+    parts.append('<div class="filterable" id="tbl-export">')
+    parts.append('<div class="table-filter"><input type="text" placeholder="Filter rows...">'
+                 '<span class="count"></span></div>')
+    if truncated:
+        parts.append(f'<div class="truncation-notice">Showing {limit} of {len(records)} records.</div>')
+    parts.append(f"<table><thead><tr>{icon_hdr}"
+                 f"{_sortable_th('FormID')}{_sortable_th('Type')}"
+                 f"{_sortable_th('Editor ID')}{_sortable_th('Name')}"
+                 f"</tr></thead><tbody>")
+    for rec in display:
         icon_td = f"<td>{_html_icon(rec.form_id, icon_map)}</td>" if has_icons else ""
         parts.append(
-            f"<tr>{icon_td}<td>{rec.form_id_hex}</td><td>{rec.record_type}</td>"
+            f"<tr>{icon_td}<td>{rec.form_id_hex}</td><td>{_badge(rec.record_type)}</td>"
             f"<td>{_esc(rec.editor_id)}</td><td>{_esc(rec.full_name)}</td></tr>"
         )
-    if len(records) > 5000:
-        parts.append(f'<tr><td colspan="5">... and {len(records) - 5000} more</td></tr>')
-    parts.append("</table>")
+    parts.append("</tbody></table></div>")
 
     return html_wrap(title, "\n".join(parts))
 

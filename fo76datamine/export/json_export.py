@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
+from fo76datamine.db.resolve import FormIDResolver
 from fo76datamine.db.store import Store
 
 
@@ -21,6 +22,8 @@ def export_json(store: Store, snapshot_id: int, record_type: Optional[str] = Non
         from fo76datamine.db.models import DbRecord
         records = [DbRecord(*row) for row in cur.fetchall()]
 
+    resolver = FormIDResolver(store, snapshot_id)
+
     data = []
     for rec in records:
         entry = {
@@ -35,7 +38,10 @@ def export_json(store: Store, snapshot_id: int, record_type: Optional[str] = Non
         # Include decoded fields
         fields = store.get_decoded_fields(snapshot_id, rec.form_id)
         if fields:
-            entry["fields"] = {f.field_name: f.field_value for f in fields}
+            entry["fields"] = {
+                f.field_name: resolver.format_field_value(f)
+                for f in fields
+            }
 
         data.append(entry)
 

@@ -61,15 +61,26 @@ DECODED_TYPES = frozenset({
     b"AMMO",  # Ammunition
     b"BOOK",  # Notes/holotapes
     b"MISC",  # Miscellaneous items
+    b"KEYM",  # Keys
     b"FLOR",  # Harvestable flora
     b"GLOB",  # Global variables
     b"GMST",  # Game settings
+    b"CONT",  # Containers
     b"PERK",  # Perks
     b"LVLI",  # Leveled item lists
+    b"LVLN",  # Leveled NPC lists
     b"ENCH",  # Enchantments
     b"MGEF",  # Magic effects
     b"SPEL",  # Spells/abilities
+    b"OMOD",  # Object modifications
+    b"FACT",  # Factions
+    b"RACE",  # Races
+    b"TERM",  # Terminals
     b"AVIF",  # Actor values
+    b"ACTI",  # Activators
+    b"LSCR",  # Loading screens
+    b"MESG",  # Messages
+    b"FURN",  # Furniture
 })
 
 # Prefixes that indicate unreleased content
