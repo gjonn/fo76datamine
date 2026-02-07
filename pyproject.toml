@@ -9,6 +9,7 @@ description = "Fallout 76 datamining tool - parse ESM, track changes, find unrel
 requires-python = ">=3.10"
 dependencies = [
     "click>=8.0",
+    "Pillow>=9.2",
     "tomli>=1.0; python_version < '3.11'",
 ]
 

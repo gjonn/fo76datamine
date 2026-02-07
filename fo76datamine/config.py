@@ -14,6 +14,50 @@ def derive_db_path(esm: Path) -> Path:
     return db_dir / "fo76datamine.db"
 
 
+def derive_texture_ba2_paths(esm: Path) -> list[Path]:
+    """Return all existing SeventySix - Textures*.ba2 paths in the Data directory."""
+    data_dir = esm.parent
+    paths = []
+    for i in range(1, 11):
+        p = data_dir / f"SeventySix - Textures{i:02d}.ba2"
+        if p.exists():
+            paths.append(p)
+    return paths
+
+
+def derive_mesh_ba2_paths(esm: Path) -> list[Path]:
+    """Return existing mesh BA2 paths (Meshes, MeshesExtra, UpdateMain)."""
+    data_dir = esm.parent
+    paths = []
+    for name in ["SeventySix - Meshes.ba2", "SeventySix - MeshesExtra.ba2"]:
+        p = data_dir / name
+        if p.exists():
+            paths.append(p)
+    # Update archives may contain newer meshes
+    for f in sorted(data_dir.glob("SeventySix - *UpdateMain*.ba2")):
+        paths.append(f)
+    return paths
+
+
+def derive_material_ba2_paths(esm: Path) -> list[Path]:
+    """Return existing material BA2 paths."""
+    data_dir = esm.parent
+    paths = []
+    p = data_dir / "SeventySix - Materials.ba2"
+    if p.exists():
+        paths.append(p)
+    # Update archives may contain newer materials
+    for f in sorted(data_dir.glob("SeventySix - *UpdateMain*.ba2")):
+        paths.append(f)
+    return paths
+
+
+def derive_workshop_icons_ba2_path(esm: Path) -> Path | None:
+    """Return the WorkshopIcons BA2 path if it exists."""
+    p = esm.parent / "SeventySix - WorkshopIcons.ba2"
+    return p if p.exists() else None
+
+
 # ESM format constants
 ESM_HEADER_SIZE = 24        # Record and GRUP headers are both 24 bytes
 SUBRECORD_HEADER_SIZE = 6   # 4-byte type + 2-byte size

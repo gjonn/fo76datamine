@@ -32,6 +32,19 @@ def decode_record(rec: Record, strings: StringTable) -> list[tuple]:
     if decoder:
         fields.extend(decoder(rec, strings))
 
+    # Universal fields: icon paths
+    icon = rec.get_subrecord("ICON")
+    if icon and icon.size > 1:
+        fields.append((rec.form_id, "icon", icon.as_string(), "str"))
+    mico = rec.get_subrecord("MICO")
+    if mico and mico.size > 1:
+        fields.append((rec.form_id, "icon_small", mico.as_string(), "str"))
+
+    # Universal fields: model path
+    modl = rec.get_subrecord("MODL")
+    if modl and modl.size > 1:
+        fields.append((rec.form_id, "model", modl.as_string(), "str"))
+
     # Universal fields: keywords
     kwda = rec.get_subrecord("KWDA")
     if kwda and kwda.size >= 4:
