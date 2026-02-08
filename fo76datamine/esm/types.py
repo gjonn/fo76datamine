@@ -18,10 +18,12 @@ TYPE_NAMES: dict[str, str] = {
     "CELL": "Cell",
     "CLAS": "Class",
     "CLMT": "Climate",
+    "CNCY": "Currency",
     "COBJ": "Constructible Object",
     "COLL": "Collision Layer",
     "CONT": "Container",
     "CSTY": "Combat Style",
+    "CURV": "Curve Table",
     "DIAL": "Dialog Topic",
     "DLBR": "Dialog Branch",
     "DMGT": "Damage Type",
@@ -110,7 +112,9 @@ DECODABLE_TYPES = frozenset({
     "MISC", "BOOK", "FLOR", "GMST", "GLOB", "PERK", "ENCH",
     "MGEF", "KEYM", "CONT", "SPEL", "OMOD", "FACT", "RACE",
     "TERM", "LVLI", "LVLN", "AVIF", "ACTI", "LSCR", "MESG",
-    "FURN",
+    "FURN", "AACT", "STAT", "MSTT", "CELL", "WRLD", "LCTN",
+    "REGN", "WTHR", "DIAL", "INFO", "IDLE", "ENTM", "SCOL",
+    "EXPL", "PROJ", "HAZD", "WATR", "CURV", "CNCY",
 })
 
 def type_name(rec_type: str) -> str:

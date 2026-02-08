@@ -163,3 +163,83 @@ FURN_BENCH_TYPE: dict[int, str] = {
     5: "smithing_weapon",
     6: "power_armor",
 }
+
+# CELL DATA flags (bitfield)
+CELL_FLAGS: dict[int, str] = {
+    0x0001: "is_interior",
+    0x0002: "has_water",
+    0x0004: "cant_travel_from",
+    0x0008: "no_lod_water",
+    0x0020: "public_area",
+    0x0040: "hand_changed",
+    0x0080: "show_sky",
+    0x0100: "use_sky_lighting",
+}
+
+# DIAL topic type
+DIAL_TYPE: dict[int, str] = {
+    0: "topic",
+    1: "conversation",
+    2: "combat",
+    3: "persuasion",
+    4: "detection",
+    5: "service",
+    6: "misc",
+    7: "scene_dialog",
+}
+
+# DIAL topic subtype
+DIAL_SUBTYPE: dict[int, str] = {
+    0: "custom",
+    1: "force_greet",
+    2: "rumors",
+    3: "custom_2",
+    4: "call",
+    5: "follow",
+    6: "move",
+    7: "attack",
+    8: "inspect",
+    9: "retrieve",
+    10: "stay",
+    11: "release",
+    12: "show_relationships",
+    13: "reject",
+    14: "heal",
+    15: "assign",
+    16: "enter",
+    17: "custom_3",
+    18: "custom_4",
+    19: "custom_5",
+}
+
+# REGN data entry type
+REGN_DATA_TYPE: dict[int, str] = {
+    2: "objects",
+    3: "weather",
+    4: "map",
+    5: "land",
+    6: "grass",
+    7: "sound",
+    8: "imposter",
+}
+
+# PROJ projectile type
+PROJ_TYPE: dict[int, str] = {
+    1: "missile",
+    2: "lobber",
+    3: "beam",
+    4: "flame",
+    5: "cone",
+    6: "barrier",
+    7: "arrow",
+}
+
+# EXPL explosion flags (bitfield)
+EXPL_FLAGS: dict[int, str] = {
+    0x0001: "always_use_world_orientation",
+    0x0002: "knock_down_always",
+    0x0004: "knock_down_by_formula",
+    0x0008: "ignore_los_check",
+    0x0010: "no_visual",
+    0x0020: "no_sound",
+}

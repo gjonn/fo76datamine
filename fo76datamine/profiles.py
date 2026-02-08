@@ -111,6 +111,22 @@ def resolve_esm(esm: Path | None, profile_name: str | None) -> Path:
     return profile.esm
 
 
+def profile_name_for_esm(esm: Path) -> str:
+    """Find the profile name that uses the given ESM path, or derive one."""
+    config = load_config()
+    try:
+        resolved = esm.resolve()
+        for name, p in config.profiles.items():
+            try:
+                if p.esm.resolve() == resolved:
+                    return name
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return esm.stem.lower()
+
+
 def resolve_profile_esm(profile_name: str) -> Path:
     """Resolve a single profile name to its ESM path (used by --vs)."""
     config = load_config()

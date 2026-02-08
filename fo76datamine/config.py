@@ -7,11 +7,11 @@ def derive_ba2_path(esm: Path) -> Path:
     return esm.parent / "SeventySix - Localization.ba2"
 
 
-def derive_db_path(esm: Path) -> Path:
-    """Derive database path from ESM path. DB lives next to ESM's parent dir."""
-    db_dir = esm.parent.parent / "fo76datamine" / "db"
+def derive_db_path(profile_name: str) -> Path:
+    """Derive database path from profile name. DB lives in project db/ dir."""
+    db_dir = Path(__file__).resolve().parent.parent / "db"
     db_dir.mkdir(parents=True, exist_ok=True)
-    return db_dir / "fo76datamine.db"
+    return db_dir / f"{profile_name}.db"
 
 
 def derive_texture_ba2_paths(esm: Path) -> list[Path]:
@@ -33,6 +33,23 @@ def derive_sounds_ba2_paths(esm: Path) -> list[Path]:
         p = data_dir / f"SeventySix - Sounds{i:02d}.ba2"
         if p.exists():
             paths.append(p)
+    return paths
+
+
+def derive_scripts_ba2_paths(esm: Path) -> list[Path]:
+    """Return all existing BA2 paths that may contain Papyrus .pex scripts."""
+    data_dir = esm.parent
+    paths = []
+    for name in [
+        "SeventySix - MiscClient.ba2",
+        "SeventySix - Startup.ba2",
+    ]:
+        p = data_dir / name
+        if p.exists():
+            paths.append(p)
+    # Update archives may contain newer scripts
+    for f in sorted(data_dir.glob("SeventySix - *UpdateMain*.ba2")):
+        paths.append(f)
     return paths
 
 

@@ -16,18 +16,30 @@ from typing import Optional
 
 from fo76datamine.esm.enums import (
     CASTING_TYPE,
+    DIAL_SUBTYPE,
+    DIAL_TYPE,
     ENCH_TYPE,
+    EXPL_FLAGS,
     FACT_REACTION,
     FURN_BENCH_TYPE,
     MGEF_ARCHETYPE,
     OMOD_FUNCTION_TYPE,
     OMOD_VALUE_TYPE,
+    PROJ_TYPE,
     QUST_TYPE,
+    REGN_DATA_TYPE,
     SPEL_TYPE,
     TARGET_TYPE,
     WEAP_ANIMATION_TYPE,
     WEAP_SOUND_LEVEL,
     lookup_enum,
+)
+from fo76datamine.esm.conditions import (
+    format_condition_summary,
+    function_name,
+    function_param_types,
+    operator_str,
+    run_on_str,
 )
 from fo76datamine.esm.records import Record, Subrecord
 from fo76datamine.strings.loader import StringTable
@@ -69,6 +81,100 @@ def decode_record(rec: Record, strings: StringTable) -> list[tuple]:
         keyword_ids = kwda.as_formid_array()
         for i, kid in enumerate(keyword_ids):
             fields.append((rec.form_id, f"keyword_{i}", f"0x{kid:08X}", "formid"))
+
+    # Universal fields: CTDA condition blocks (present across many record types).
+    fields.extend(_decode_ctda_conditions(rec))
+
+    return fields
+
+
+def _decode_ctda_conditions(rec: Record) -> list[tuple]:
+    """Decode CTDA condition blocks into diff/search-friendly fields.
+
+    Walks subrecords sequentially to link each CTDA with its trailing
+    CIS1/CIS2 string parameter subrecords. Resolves function names and
+    comparison operators using function table.
+    """
+    fields: list[tuple] = []
+    fid = rec.form_id
+
+    # Group CTDA + trailing CIS1/CIS2 by walking subrecords in order.
+    groups: list[tuple[Subrecord, str | None, str | None]] = []
+    current_ctda: Subrecord | None = None
+    cis1: str | None = None
+    cis2: str | None = None
+    for sub in rec.subrecords:
+        if sub.type == "CTDA":
+            if current_ctda is not None:
+                groups.append((current_ctda, cis1, cis2))
+            current_ctda = sub
+            cis1 = cis2 = None
+        elif sub.type == "CIS1" and current_ctda is not None:
+            cis1 = sub.data.rstrip(b"\x00").decode("utf-8", errors="replace")
+        elif sub.type == "CIS2" and current_ctda is not None:
+            cis2 = sub.data.rstrip(b"\x00").decode("utf-8", errors="replace")
+    if current_ctda is not None:
+        groups.append((current_ctda, cis1, cis2))
+
+    if not groups:
+        return fields
+
+    fields.append((fid, "condition_count", str(len(groups)), "int"))
+
+    for i, (ctda, cis1_str, cis2_str) in enumerate(groups):
+        d = ctda.data
+        pfx = f"condition_{i}"
+
+        # Raw data (lossless)
+        fields.append((fid, f"{pfx}_raw", d.hex(), "str"))
+
+        # Parse standard CTDA layout (32 bytes):
+        # offset 0: op_byte, 1-3: padding, 4-7: comparison (float),
+        # 8-9: function (uint16), 10-11: padding,
+        # 12-15: param1, 16-19: param2, 20-23: run_on,
+        # 24-27: reference, 28-31: unknown
+        op_byte = d[0] if ctda.size >= 1 else 0
+        comp_val = struct.unpack_from("<f", d, 4)[0] if ctda.size >= 8 else 0.0
+        func_idx = struct.unpack_from("<H", d, 8)[0] if ctda.size >= 10 else 0
+        param1 = struct.unpack_from("<I", d, 12)[0] if ctda.size >= 16 else 0
+        param2 = struct.unpack_from("<I", d, 16)[0] if ctda.size >= 20 else 0
+        run_on = struct.unpack_from("<I", d, 20)[0] if ctda.size >= 24 else 0
+        ref_fid = struct.unpack_from("<I", d, 24)[0] if ctda.size >= 28 else 0
+
+        # Function name and operator
+        fields.append((fid, f"{pfx}_function", str(func_idx), "int"))
+        fields.append((fid, f"{pfx}_function_name", function_name(func_idx), "str"))
+        fields.append((fid, f"{pfx}_operator", operator_str(op_byte), "str"))
+
+        # Comparison value
+        if ctda.size >= 8:
+            fields.append((fid, f"{pfx}_comparison", f"{comp_val:.6f}", "float"))
+
+        # Parameters (raw hex preserved, plus string values from CIS1/CIS2)
+        if ctda.size >= 16:
+            fields.append((fid, f"{pfx}_param1_hex", f"0x{param1:08X}", "str"))
+        if cis1_str:
+            fields.append((fid, f"{pfx}_param1_string", cis1_str, "str"))
+        if ctda.size >= 20:
+            fields.append((fid, f"{pfx}_param2_hex", f"0x{param2:08X}", "str"))
+        if cis2_str:
+            fields.append((fid, f"{pfx}_param2_string", cis2_str, "str"))
+
+        # Run-on target
+        if ctda.size >= 24:
+            fields.append((fid, f"{pfx}_run_on", run_on_str(run_on), "str"))
+
+        # Reference FormID
+        if ctda.size >= 28 and ref_fid != 0 and ref_fid != 0xFFFFFFFF:
+            fields.append((fid, f"{pfx}_reference", f"0x{ref_fid:08X}", "formid"))
+
+        # Human-readable summary
+        if ctda.size >= 10:
+            summary = format_condition_summary(
+                func_idx, op_byte, comp_val,
+                param1, param2, cis1_str, cis2_str, run_on,
+            )
+            fields.append((fid, f"{pfx}_summary", summary, "str"))
 
     return fields
 
@@ -917,6 +1023,574 @@ def _decode_furn(rec: Record, strings: StringTable) -> list[tuple]:
     return fields
 
 
+def _decode_aact(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode AACT (Action) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # CNAM: color (uint32 RGBA)
+    cnam = rec.get_subrecord("CNAM")
+    if cnam and cnam.size >= 4:
+        fields.append((fid, "color", f"0x{struct.unpack_from('<I', cnam.data, 0)[0]:08X}", "flags"))
+
+    return fields
+
+
+def _decode_stat(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode STAT (Static) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # DNAM: max angle (float) + leaf amplitude/frequency
+    dnam = rec.get_subrecord("DNAM")
+    if dnam and dnam.size >= 4:
+        max_angle = struct.unpack_from("<f", dnam.data, 0)[0]
+        fields.append((fid, "max_angle", f"{max_angle:.2f}", "float"))
+        if dnam.size >= 8:
+            leaf_amplitude = struct.unpack_from("<f", dnam.data, 4)[0]
+            fields.append((fid, "leaf_amplitude", f"{leaf_amplitude:.4f}", "float"))
+            if dnam.size >= 12:
+                leaf_frequency = struct.unpack_from("<f", dnam.data, 8)[0]
+                fields.append((fid, "leaf_frequency", f"{leaf_frequency:.4f}", "float"))
+
+    return fields
+
+
+def _decode_mstt(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode MSTT (Moveable Static) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # DATA: flags (byte)
+    data = rec.get_subrecord("DATA")
+    if data and data.size >= 1:
+        flags = data.data[0]
+        fields.append((fid, "mstt_flags", f"0x{flags:02X}", "flags"))
+        fields.append((fid, "on_local_map", str(bool(flags & 0x01)), "str"))
+
+    # SNAM: sound FormID
+    snam = rec.get_subrecord("SNAM")
+    if snam and snam.size >= 4:
+        sound_fid = struct.unpack_from("<I", snam.data, 0)[0]
+        if sound_fid:
+            fields.append((fid, "sound", f"0x{sound_fid:08X}", "formid"))
+
+    return fields
+
+
+def _decode_cell(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode CELL (Cell) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # DATA: cell flags (uint16)
+    data = rec.get_subrecord("DATA")
+    if data and data.size >= 2:
+        flags = struct.unpack_from("<H", data.data, 0)[0]
+        fields.append((fid, "cell_flags", f"0x{flags:04X}", "flags"))
+        fields.append((fid, "is_interior", str(bool(flags & 0x0001)), "str"))
+        fields.append((fid, "has_water", str(bool(flags & 0x0002)), "str"))
+        fields.append((fid, "public_area", str(bool(flags & 0x0020)), "str"))
+
+    # XCLC: grid position (int32 x, int32 y)
+    xclc = rec.get_subrecord("XCLC")
+    if xclc and xclc.size >= 8:
+        grid_x = struct.unpack_from("<i", xclc.data, 0)[0]
+        grid_y = struct.unpack_from("<i", xclc.data, 4)[0]
+        fields.append((fid, "grid_x", str(grid_x), "int"))
+        fields.append((fid, "grid_y", str(grid_y), "int"))
+
+    # XNAM: water height (float)
+    xnam = rec.get_subrecord("XNAM")
+    if xnam and xnam.size >= 4:
+        water_height = struct.unpack_from("<f", xnam.data, 0)[0]
+        fields.append((fid, "water_height", f"{water_height:.2f}", "float"))
+
+    # XCMO: music type FormID
+    xcmo = rec.get_subrecord("XCMO")
+    if xcmo and xcmo.size >= 4:
+        music_fid = struct.unpack_from("<I", xcmo.data, 0)[0]
+        if music_fid:
+            fields.append((fid, "music_type", f"0x{music_fid:08X}", "formid"))
+
+    return fields
+
+
+def _decode_wrld(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode WRLD (Worldspace) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # DNAM: default land height (float) + default water height (float)
+    dnam = rec.get_subrecord("DNAM")
+    if dnam and dnam.size >= 8:
+        fields.append((fid, "default_land_height", f"{struct.unpack_from('<f', dnam.data, 0)[0]:.2f}", "float"))
+        fields.append((fid, "default_water_height", f"{struct.unpack_from('<f', dnam.data, 4)[0]:.2f}", "float"))
+
+    # MNAM: map dimensions
+    mnam = rec.get_subrecord("MNAM")
+    if mnam and mnam.size >= 16:
+        d = mnam.data
+        fields.append((fid, "usable_x", str(struct.unpack_from("<I", d, 0)[0]), "int"))
+        fields.append((fid, "usable_y", str(struct.unpack_from("<I", d, 4)[0]), "int"))
+
+    # NAM0: min world coords
+    nam0 = rec.get_subrecord("NAM0")
+    if nam0 and nam0.size >= 8:
+        fields.append((fid, "min_x", f"{struct.unpack_from('<f', nam0.data, 0)[0]:.2f}", "float"))
+        fields.append((fid, "min_y", f"{struct.unpack_from('<f', nam0.data, 4)[0]:.2f}", "float"))
+
+    # NAM9: max world coords
+    nam9 = rec.get_subrecord("NAM9")
+    if nam9 and nam9.size >= 8:
+        fields.append((fid, "max_x", f"{struct.unpack_from('<f', nam9.data, 0)[0]:.2f}", "float"))
+        fields.append((fid, "max_y", f"{struct.unpack_from('<f', nam9.data, 4)[0]:.2f}", "float"))
+
+    # CNAM: climate FormID
+    cnam = rec.get_subrecord("CNAM")
+    if cnam and cnam.size >= 4:
+        climate_fid = struct.unpack_from("<I", cnam.data, 0)[0]
+        if climate_fid:
+            fields.append((fid, "climate", f"0x{climate_fid:08X}", "formid"))
+
+    # WNAM: water type FormID
+    wnam = rec.get_subrecord("WNAM")
+    if wnam and wnam.size >= 4:
+        water_fid = struct.unpack_from("<I", wnam.data, 0)[0]
+        if water_fid:
+            fields.append((fid, "water_type", f"0x{water_fid:08X}", "formid"))
+
+    return fields
+
+
+def _decode_lctn(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode LCTN (Location) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # PNAM: parent location FormID
+    pnam = rec.get_subrecord("PNAM")
+    if pnam and pnam.size >= 4:
+        parent_fid = struct.unpack_from("<I", pnam.data, 0)[0]
+        if parent_fid:
+            fields.append((fid, "parent_location", f"0x{parent_fid:08X}", "formid"))
+
+    # LCEC: encounter zone FormID
+    lcec = rec.get_subrecord("LCEC")
+    if lcec and lcec.size >= 4:
+        enc_zone = struct.unpack_from("<I", lcec.data, 0)[0]
+        if enc_zone:
+            fields.append((fid, "encounter_zone", f"0x{enc_zone:08X}", "formid"))
+
+    # CNAM: location color (uint32)
+    cnam = rec.get_subrecord("CNAM")
+    if cnam and cnam.size >= 4:
+        fields.append((fid, "location_color", f"0x{struct.unpack_from('<I', cnam.data, 0)[0]:08X}", "flags"))
+
+    # NAM1: minimum level (int32)
+    nam1 = rec.get_subrecord("NAM1")
+    if nam1 and nam1.size >= 4:
+        min_level = struct.unpack_from("<i", nam1.data, 0)[0]
+        fields.append((fid, "min_level", str(min_level), "int"))
+
+    return fields
+
+
+def _decode_regn(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode REGN (Region) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # RDMP: map name string
+    rdmp = rec.get_subrecord("RDMP")
+    if rdmp and rdmp.size > 1:
+        fields.append((fid, "map_name", rdmp.as_string(), "str"))
+
+    # RDAT: region data headers (8 bytes each: type uint32 + flags uint32)
+    rdats = rec.get_subrecords("RDAT")
+    for i, rdat in enumerate(rdats):
+        if rdat.size >= 8:
+            data_type = struct.unpack_from("<I", rdat.data, 0)[0]
+            flags = struct.unpack_from("<I", rdat.data, 4)[0]
+            fields.append((fid, f"region_data_{i}_type", lookup_enum(REGN_DATA_TYPE, data_type), "enum"))
+            fields.append((fid, f"region_data_{i}_flags", f"0x{flags:08X}", "flags"))
+
+    # RDWT: weather entries (12 bytes each: weather FormID + weight + global FormID)
+    rdwt = rec.get_subrecord("RDWT")
+    if rdwt and rdwt.size >= 12:
+        count = rdwt.size // 12
+        for j in range(count):
+            offset = j * 12
+            weather_fid = struct.unpack_from("<I", rdwt.data, offset)[0]
+            weight = struct.unpack_from("<I", rdwt.data, offset + 4)[0]
+            if weather_fid:
+                fields.append((fid, f"weather_{j}_id", f"0x{weather_fid:08X}", "formid"))
+                fields.append((fid, f"weather_{j}_weight", str(weight), "int"))
+
+    return fields
+
+
+def _decode_wthr(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode WTHR (Weather) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # DNAM: fog distances (32+ bytes)
+    dnam = rec.get_subrecord("DNAM")
+    if dnam and dnam.size >= 24:
+        d = dnam.data
+        fields.append((fid, "fog_day_near", f"{struct.unpack_from('<f', d, 0)[0]:.2f}", "float"))
+        fields.append((fid, "fog_day_far", f"{struct.unpack_from('<f', d, 4)[0]:.2f}", "float"))
+        fields.append((fid, "fog_night_near", f"{struct.unpack_from('<f', d, 8)[0]:.2f}", "float"))
+        fields.append((fid, "fog_night_far", f"{struct.unpack_from('<f', d, 12)[0]:.2f}", "float"))
+        fields.append((fid, "fog_day_power", f"{struct.unpack_from('<f', d, 16)[0]:.4f}", "float"))
+        fields.append((fid, "fog_night_power", f"{struct.unpack_from('<f', d, 20)[0]:.4f}", "float"))
+
+    # DATA: wind/precipitation (19+ bytes)
+    data = rec.get_subrecord("DATA")
+    if data and data.size >= 19:
+        d = data.data
+        fields.append((fid, "wind_speed", str(d[0]), "int"))
+        fields.append((fid, "trans_delta", str(d[4]), "int"))
+        fields.append((fid, "sun_glare", str(d[5]), "int"))
+        fields.append((fid, "sun_damage", str(d[6]), "int"))
+        fields.append((fid, "precip_begin_fade_in", str(d[7]), "int"))
+        fields.append((fid, "precip_end_fade_out", str(d[8]), "int"))
+
+    # Count cloud textures (subrecords like 00TX, 10TX, etc.)
+    cloud_count = 0
+    for sub in rec.subrecords:
+        if len(sub.type) == 4 and sub.type.endswith("0TX") and sub.size > 1:
+            cloud_count += 1
+    if cloud_count:
+        fields.append((fid, "cloud_texture_count", str(cloud_count), "int"))
+
+    return fields
+
+
+def _decode_dial(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode DIAL (Dialog Topic) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # DATA: topic flags, type, subtype
+    data = rec.get_subrecord("DATA")
+    if data and data.size >= 1:
+        topic_flags = data.data[0]
+        fields.append((fid, "topic_flags", f"0x{topic_flags:02X}", "flags"))
+        if data.size >= 2:
+            topic_type = data.data[1]
+            fields.append((fid, "topic_type", lookup_enum(DIAL_TYPE, topic_type), "enum"))
+        if data.size >= 4:
+            subtype = struct.unpack_from("<H", data.data, 2)[0]
+            fields.append((fid, "topic_subtype", lookup_enum(DIAL_SUBTYPE, subtype), "enum"))
+
+    # SNAM: top-level branch FormID
+    snam = rec.get_subrecord("SNAM")
+    if snam and snam.size >= 4:
+        branch_fid = struct.unpack_from("<I", snam.data, 0)[0]
+        if branch_fid:
+            fields.append((fid, "branch", f"0x{branch_fid:08X}", "formid"))
+
+    # QNAM: quest FormID
+    qnam = rec.get_subrecord("QNAM")
+    if qnam and qnam.size >= 4:
+        quest_fid = struct.unpack_from("<I", qnam.data, 0)[0]
+        if quest_fid:
+            fields.append((fid, "quest", f"0x{quest_fid:08X}", "formid"))
+
+    return fields
+
+
+def _decode_info(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode INFO (Dialog Response) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # ENAM: info flags (uint16) + hours until reset (uint16)
+    enam = rec.get_subrecord("ENAM")
+    if enam and enam.size >= 2:
+        flags = struct.unpack_from("<H", enam.data, 0)[0]
+        fields.append((fid, "info_flags", f"0x{flags:04X}", "flags"))
+        if enam.size >= 4:
+            hours_until_reset = struct.unpack_from("<H", enam.data, 2)[0]
+            if hours_until_reset:
+                fields.append((fid, "hours_until_reset", str(hours_until_reset), "int"))
+
+    # NAM1: response text (raw embedded string)
+    nam1 = rec.get_subrecord("NAM1")
+    if nam1 and nam1.size > 1:
+        fields.append((fid, "response_text", nam1.as_string(), "str"))
+
+    # RNAM: response text localized string ID
+    rnam = rec.get_subrecord("RNAM")
+    if rnam and rnam.size >= 4:
+        str_id = struct.unpack_from("<I", rnam.data, 0)[0]
+        if str_id:
+            text = strings.lookup(str_id)
+            fields.append((fid, "response_text_loc", text or f"0x{str_id:08X}", "str"))
+
+    # CTDA: condition count
+    ctdas = rec.get_subrecords("CTDA")
+    if ctdas:
+        fields.append((fid, "condition_count", str(len(ctdas)), "int"))
+
+    return fields
+
+
+def _decode_idle(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode IDLE (Idle Animation) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # DNAM: animation file path
+    dnam = rec.get_subrecord("DNAM")
+    if dnam and dnam.size > 1:
+        fields.append((fid, "animation_file", dnam.as_string(), "str"))
+
+    # ENAM: animation event string
+    enam = rec.get_subrecord("ENAM")
+    if enam and enam.size > 1:
+        fields.append((fid, "animation_event", enam.as_string(), "str"))
+
+    # ANAM: parent idle FormID
+    anam = rec.get_subrecord("ANAM")
+    if anam and anam.size >= 4:
+        parent_fid = struct.unpack_from("<I", anam.data, 0)[0]
+        if parent_fid:
+            fields.append((fid, "parent_idle", f"0x{parent_fid:08X}", "formid"))
+
+    return fields
+
+
+def _decode_entm(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode ENTM (Entitlement) fields — Atomic Shop items."""
+    fields = []
+    fid = rec.form_id
+
+    # BNAM: entitlement ID string
+    bnam = rec.get_subrecord("BNAM")
+    if bnam and bnam.size > 1:
+        fields.append((fid, "entitlement_id", bnam.as_string(), "str"))
+
+    # DNAM: price (uint32) + flags (uint32)
+    dnam = rec.get_subrecord("DNAM")
+    if dnam and dnam.size >= 4:
+        price = struct.unpack_from("<I", dnam.data, 0)[0]
+        fields.append((fid, "price", str(price), "int"))
+        if dnam.size >= 8:
+            flags = struct.unpack_from("<I", dnam.data, 4)[0]
+            fields.append((fid, "entm_flags", f"0x{flags:08X}", "flags"))
+
+    # INAM: image path string
+    inam = rec.get_subrecord("INAM")
+    if inam and inam.size > 1:
+        fields.append((fid, "image_path", inam.as_string(), "str"))
+
+    return fields
+
+
+def _decode_scol(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode SCOL (Static Collection) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # ONAM: static FormIDs (each ONAM begins a group with following DATA placements)
+    onams = rec.get_subrecords("ONAM")
+    for i, onam in enumerate(onams):
+        if onam.size >= 4:
+            static_fid = struct.unpack_from("<I", onam.data, 0)[0]
+            fields.append((fid, f"static_{i}_ref", f"0x{static_fid:08X}", "formid"))
+
+    # Count total placements from DATA subrecords (28 bytes each: pos XYZ + rot XYZ + scale)
+    datas = rec.get_subrecords("DATA")
+    placement_count = 0
+    for data_sub in datas:
+        if data_sub.size >= 28:
+            placement_count += data_sub.size // 28
+    if placement_count:
+        fields.append((fid, "placement_count", str(placement_count), "int"))
+
+    return fields
+
+
+def _decode_expl(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode EXPL (Explosion) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # DATA: explosion data struct (40+ bytes)
+    data = rec.get_subrecord("DATA")
+    if data and data.size >= 40:
+        d = data.data
+        light_fid = struct.unpack_from("<I", d, 0)[0]
+        if light_fid:
+            fields.append((fid, "light", f"0x{light_fid:08X}", "formid"))
+        sound1_fid = struct.unpack_from("<I", d, 4)[0]
+        if sound1_fid:
+            fields.append((fid, "sound1", f"0x{sound1_fid:08X}", "formid"))
+        sound2_fid = struct.unpack_from("<I", d, 8)[0]
+        if sound2_fid:
+            fields.append((fid, "sound2", f"0x{sound2_fid:08X}", "formid"))
+        imad_fid = struct.unpack_from("<I", d, 12)[0]
+        if imad_fid:
+            fields.append((fid, "image_space_modifier", f"0x{imad_fid:08X}", "formid"))
+        fields.append((fid, "force", f"{struct.unpack_from('<f', d, 16)[0]:.2f}", "float"))
+        fields.append((fid, "damage", f"{struct.unpack_from('<f', d, 20)[0]:.2f}", "float"))
+        fields.append((fid, "radius", f"{struct.unpack_from('<f', d, 24)[0]:.2f}", "float"))
+        flags = struct.unpack_from("<I", d, 36)[0]
+        fields.append((fid, "expl_flags", f"0x{flags:08X}", "flags"))
+
+    return fields
+
+
+def _decode_proj(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode PROJ (Projectile) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # DATA: projectile data struct (48+ bytes)
+    data = rec.get_subrecord("DATA")
+    if data and data.size >= 36:
+        d = data.data
+        flags = struct.unpack_from("<I", d, 0)[0]
+        fields.append((fid, "proj_flags", f"0x{flags:08X}", "flags"))
+        proj_type = struct.unpack_from("<H", d, 4)[0]
+        fields.append((fid, "proj_type", lookup_enum(PROJ_TYPE, proj_type), "enum"))
+        fields.append((fid, "gravity", f"{struct.unpack_from('<f', d, 8)[0]:.4f}", "float"))
+        fields.append((fid, "speed", f"{struct.unpack_from('<f', d, 12)[0]:.2f}", "float"))
+        fields.append((fid, "range", f"{struct.unpack_from('<f', d, 16)[0]:.2f}", "float"))
+        light_fid = struct.unpack_from("<I", d, 20)[0]
+        if light_fid:
+            fields.append((fid, "light", f"0x{light_fid:08X}", "formid"))
+        muzzle_light_fid = struct.unpack_from("<I", d, 24)[0]
+        if muzzle_light_fid:
+            fields.append((fid, "muzzle_light", f"0x{muzzle_light_fid:08X}", "formid"))
+        expl_fid = struct.unpack_from("<I", d, 28)[0]
+        if expl_fid:
+            fields.append((fid, "explosion", f"0x{expl_fid:08X}", "formid"))
+        sound_fid = struct.unpack_from("<I", d, 32)[0]
+        if sound_fid:
+            fields.append((fid, "sound", f"0x{sound_fid:08X}", "formid"))
+
+    return fields
+
+
+def _decode_hazd(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode HAZD (Hazard) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # DATA: hazard data struct (28+ bytes)
+    data = rec.get_subrecord("DATA")
+    if data and data.size >= 28:
+        d = data.data
+        fields.append((fid, "limit", str(struct.unpack_from("<I", d, 0)[0]), "int"))
+        fields.append((fid, "radius", f"{struct.unpack_from('<f', d, 4)[0]:.2f}", "float"))
+        fields.append((fid, "lifetime", f"{struct.unpack_from('<f', d, 8)[0]:.2f}", "float"))
+        imad_fid = struct.unpack_from("<I", d, 12)[0]
+        if imad_fid:
+            fields.append((fid, "image_space_modifier", f"0x{imad_fid:08X}", "formid"))
+        flags = struct.unpack_from("<I", d, 16)[0]
+        fields.append((fid, "hazd_flags", f"0x{flags:08X}", "flags"))
+        spell_fid = struct.unpack_from("<I", d, 20)[0]
+        if spell_fid:
+            fields.append((fid, "spell", f"0x{spell_fid:08X}", "formid"))
+        light_fid = struct.unpack_from("<I", d, 24)[0]
+        if light_fid:
+            fields.append((fid, "light", f"0x{light_fid:08X}", "formid"))
+
+    return fields
+
+
+def _decode_watr(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode WATR (Water) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # DNAM: water properties (opacity, colors, etc.)
+    dnam = rec.get_subrecord("DNAM")
+    if dnam and dnam.size >= 16:
+        d = dnam.data
+        fields.append((fid, "opacity", f"{struct.unpack_from('<f', d, 0)[0]:.4f}", "float"))
+        if dnam.size >= 12:
+            fields.append((fid, "shallow_color_r", str(d[4]), "int"))
+            fields.append((fid, "shallow_color_g", str(d[5]), "int"))
+            fields.append((fid, "shallow_color_b", str(d[6]), "int"))
+            fields.append((fid, "deep_color_r", str(d[8]), "int"))
+            fields.append((fid, "deep_color_g", str(d[9]), "int"))
+            fields.append((fid, "deep_color_b", str(d[10]), "int"))
+
+    # ANAM: fog near amount (float)
+    anam = rec.get_subrecord("ANAM")
+    if anam and anam.size >= 4:
+        fields.append((fid, "fog_near_amount", f"{struct.unpack_from('<f', anam.data, 0)[0]:.4f}", "float"))
+
+    # FNAM: flags
+    fnam = rec.get_subrecord("FNAM")
+    if fnam and fnam.size >= 1:
+        fields.append((fid, "watr_flags", f"0x{fnam.data[0]:02X}", "flags"))
+
+    # SNAM: spell FormID (damage on contact)
+    snam = rec.get_subrecord("SNAM")
+    if snam and snam.size >= 4:
+        spell_fid = struct.unpack_from("<I", snam.data, 0)[0]
+        if spell_fid:
+            fields.append((fid, "damage_spell", f"0x{spell_fid:08X}", "formid"))
+
+    return fields
+
+
+def _decode_curv(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode CURV (Curve Table) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # JASF: JSON asset file path
+    jasf = rec.get_subrecord("JASF")
+    if jasf and jasf.size > 1:
+        fields.append((fid, "json_asset_file", jasf.as_string(), "str"))
+
+    # CRVE: embedded curve entries (variable size)
+    crves = rec.get_subrecords("CRVE")
+    if crves:
+        fields.append((fid, "curve_entry_count", str(len(crves)), "int"))
+
+    return fields
+
+
+def _decode_cncy(rec: Record, strings: StringTable) -> list[tuple]:
+    """Decode CNCY (Currency) fields."""
+    fields = []
+    fid = rec.form_id
+
+    # DURL: display name string
+    durl = rec.get_subrecord("DURL")
+    if durl and durl.size > 1:
+        fields.append((fid, "display_name", durl.as_string(), "str"))
+
+    # MXCT: max count (uint32)
+    mxct = rec.get_subrecord("MXCT")
+    if mxct and mxct.size >= 4:
+        max_count = struct.unpack_from("<I", mxct.data, 0)[0]
+        fields.append((fid, "max_count", str(max_count), "int"))
+
+    # CRTY: currency type (uint16)
+    crty = rec.get_subrecord("CRTY")
+    if crty and crty.size >= 2:
+        currency_type = struct.unpack_from("<H", crty.data, 0)[0]
+        fields.append((fid, "currency_type", str(currency_type), "int"))
+
+    # FNAM: flags (uint32)
+    fnam = rec.get_subrecord("FNAM")
+    if fnam and fnam.size >= 4:
+        flags = struct.unpack_from("<I", fnam.data, 0)[0]
+        if flags:
+            fields.append((fid, "cncy_flags", f"0x{flags:08X}", "flags"))
+
+    return fields
+
+
 # Decoder registry
 _DECODERS = {
     "WEAP": _decode_weap,
@@ -948,4 +1622,23 @@ _DECODERS = {
     "LSCR": _decode_lscr,
     "MESG": _decode_mesg,
     "FURN": _decode_furn,
+    "AACT": _decode_aact,
+    "STAT": _decode_stat,
+    "MSTT": _decode_mstt,
+    "CELL": _decode_cell,
+    "WRLD": _decode_wrld,
+    "LCTN": _decode_lctn,
+    "REGN": _decode_regn,
+    "WTHR": _decode_wthr,
+    "DIAL": _decode_dial,
+    "INFO": _decode_info,
+    "IDLE": _decode_idle,
+    "ENTM": _decode_entm,
+    "SCOL": _decode_scol,
+    "EXPL": _decode_expl,
+    "PROJ": _decode_proj,
+    "HAZD": _decode_hazd,
+    "WATR": _decode_watr,
+    "CURV": _decode_curv,
+    "CNCY": _decode_cncy,
 }

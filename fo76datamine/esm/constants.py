@@ -81,6 +81,25 @@ DECODED_TYPES = frozenset({
     b"LSCR",  # Loading screens
     b"MESG",  # Messages
     b"FURN",  # Furniture
+    b"AACT",  # Actions
+    b"STAT",  # Statics
+    b"MSTT",  # Moveable statics
+    b"CELL",  # Cells
+    b"WRLD",  # Worldspaces
+    b"LCTN",  # Locations
+    b"REGN",  # Regions
+    b"WTHR",  # Weather
+    b"DIAL",  # Dialog topics
+    b"INFO",  # Dialog responses
+    b"IDLE",  # Idle animations
+    b"ENTM",  # Entitlements
+    b"SCOL",  # Static collections
+    b"EXPL",  # Explosions
+    b"PROJ",  # Projectiles
+    b"HAZD",  # Hazards
+    b"WATR",  # Water
+    b"CURV",  # Curve tables
+    b"CNCY",  # Currencies
 })
 
 # Prefixes that indicate unreleased content

@@ -10,6 +10,7 @@ import click
 from fo76datamine.config import derive_ba2_path, derive_db_path
 from fo76datamine.profiles import (
     load_config,
+    profile_name_for_esm,
     resolve_esm,
     resolve_profile_esm,
     save_config,
@@ -27,11 +28,20 @@ class Context:
         self._explicit_esm = esm
         self._profile_name = profile
         self._resolved_esm: Path | None = None
+        self._resolved_profile: str | None = None
         self._resolved = False
 
     def _resolve(self):
         if not self._resolved:
             self._resolved_esm = resolve_esm(self._explicit_esm, self._profile_name)
+            # Determine effective profile name
+            if self._profile_name is not None:
+                self._resolved_profile = self._profile_name
+            elif self._explicit_esm is not None:
+                self._resolved_profile = profile_name_for_esm(self._explicit_esm)
+            else:
+                config = load_config()
+                self._resolved_profile = config.default_profile or "default"
             self._resolved = True
 
     @property
@@ -40,12 +50,17 @@ class Context:
         return self._resolved_esm  # type: ignore[return-value]
 
     @property
+    def profile_name(self) -> str:
+        self._resolve()
+        return self._resolved_profile  # type: ignore[return-value]
+
+    @property
     def ba2(self) -> Path:
         return derive_ba2_path(self.esm)
 
     @property
     def db(self) -> Path:
-        return derive_db_path(self.esm)
+        return derive_db_path(self.profile_name)
 
 
 pass_ctx = click.make_pass_decorator(Context)
@@ -355,7 +370,10 @@ def diff(ctx: Context, latest: bool, old_id: Optional[int], new_id: Optional[int
     new_store = None
 
     if other_esm is not None:
-        other_db = derive_db_path(other_esm)
+        if vs_profile is not None:
+            other_db = derive_db_path(vs_profile)
+        else:
+            other_db = derive_db_path(profile_name_for_esm(other_esm))
         new_store = Store(other_db)
 
     # The store used for "new" snapshot lookups
@@ -1137,3 +1155,105 @@ def sounds(ctx: Context, filter_pattern: Optional[str], output_dir: Path,
     click.echo()  # newline after progress
     click.echo(f"Extracted: {result.extracted}  Converted: {result.converted}  "
                f"Errors: {result.errors}  Time: {elapsed:.1f}s")
+
+
+@cli.command()
+@click.option("--filter", "-f", "filter_pattern", default=None,
+              help="Path fragment or glob pattern (e.g. quest*, scripts/source/*.pex)")
+@click.option("--output", "-o", "output_dir", type=click.Path(path_type=Path),
+              default=Path("./scripts"), help="Output directory (default: ./scripts)")
+@click.option("--list-only", is_flag=True, help="List matching files without extracting")
+@pass_ctx
+def scripts(ctx: Context, filter_pattern: Optional[str], output_dir: Path,
+            list_only: bool):
+    """Extract Papyrus .pex scripts from BA2 archives."""
+    from fo76datamine.ba2.scripts import ScriptExtractor, parse_pex_header
+
+    extractor = ScriptExtractor(ctx.esm)
+    matches = extractor.list_scripts(filter_pattern)
+
+    if not matches:
+        click.echo("No script files found.")
+        return
+
+    if list_only:
+        click.echo(f"{'Size':>10}  {'Source':<50}  Path")
+        click.echo("-" * 100)
+        for reader, entry in matches:
+            size_kb = entry.unpacked_size / 1024
+            # Try to parse header for source file info
+            source = ""
+            try:
+                raw = reader.extract_file(entry)
+                hdr = parse_pex_header(raw)
+                if hdr and hdr.source_file:
+                    source = hdr.source_file
+            except Exception:
+                pass
+            click.echo(f"{size_kb:>8.0f}KB  {source:<50}  {entry.name}")
+        click.echo(f"\n{len(matches)} script file(s)")
+        return
+
+    def _progress(current: int, total: int) -> None:
+        click.echo(f"\rExtracting scripts... {current}/{total}", nl=False)
+
+    t0 = time.perf_counter()
+    result = extractor.extract_scripts(
+        output_dir, filter_pattern=filter_pattern,
+        progress_callback=_progress,
+    )
+    elapsed = time.perf_counter() - t0
+
+    click.echo()  # newline after progress
+    click.echo(f"Extracted: {result.extracted}  Errors: {result.errors}  Time: {elapsed:.1f}s")
+
+
+@cli.command()
+@click.option("--output", "-o", "output_path", type=click.Path(), default=None,
+              help="Write output to a file instead of stdout")
+@pass_ctx
+def seq(ctx: Context, output_path: Optional[str]):
+    """Parse SeventySix.seq and list auto-start quest FormIDs."""
+    import struct as _struct
+
+    from fo76datamine.db.store import Store
+
+    seq_path = ctx.esm.parent / "SeventySix.seq"
+    if not seq_path.exists():
+        click.echo(f"SEQ file not found: {seq_path}")
+        return
+
+    data = seq_path.read_bytes()
+    if len(data) < 4:
+        click.echo("SEQ file is empty or too small.")
+        return
+
+    count = len(data) // 4
+    form_ids = list(_struct.unpack(f"<{count}I", data[:count * 4]))
+
+    click.echo(f"Found {count} auto-start quest FormIDs in {seq_path.name}\n")
+
+    # Cross-reference with quest names from DB
+    store = Store(ctx.db)
+    snap = store.get_latest_snapshot()
+    names: dict[int, str] = {}
+    if snap:
+        for fid in form_ids:
+            rec = store.get_record(snap.id, fid)
+            if rec:
+                names[fid] = rec.full_name or rec.editor_id or ""
+
+    lines = []
+    click.echo(f"{'FormID':<12}  {'Name/Editor ID'}")
+    click.echo("-" * 60)
+    for fid in form_ids:
+        name = names.get(fid, "")
+        line = f"0x{fid:08X}  {name}"
+        lines.append(line)
+        click.echo(f"  {line}")
+
+    if output_path:
+        Path(output_path).write_text("\n".join(lines), encoding="utf-8")
+        click.echo(f"\nWritten to {output_path}")
+
+    store.close()
