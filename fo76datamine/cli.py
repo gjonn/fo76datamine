@@ -1088,3 +1088,52 @@ def clear(ctx: Context, yes: bool):
     count = store.clear_all_snapshots()
     store.close()
     click.echo(f"Deleted {count} snapshot(s).")
+
+
+@cli.command()
+@click.option("--filter", "-f", "filter_pattern", default=None,
+              help="Path fragment or glob pattern (e.g. music, sound/fx/wpn/*.xwm)")
+@click.option("--output", "-o", "output_dir", type=click.Path(path_type=Path),
+              default=Path("./sounds"), help="Output directory (default: ./sounds)")
+@click.option("--raw", is_flag=True, help="Skip xwm-to-wav conversion")
+@click.option("--list-only", is_flag=True, help="List matching files without extracting")
+@pass_ctx
+def sounds(ctx: Context, filter_pattern: Optional[str], output_dir: Path,
+           raw: bool, list_only: bool):
+    """Extract sound files (.xwm, .fuz, .wav) from Sound BA2 archives."""
+    from fo76datamine.ba2.sounds import SoundExtractor, check_ffmpeg
+
+    extractor = SoundExtractor(ctx.esm)
+    matches = extractor.list_sounds(filter_pattern)
+
+    if not matches:
+        click.echo("No sound files found.")
+        return
+
+    if list_only:
+        click.echo(f"{'Size':>10}  Path")
+        click.echo("-" * 70)
+        for _reader, entry in matches:
+            size_kb = entry.unpacked_size / 1024
+            click.echo(f"{size_kb:>8.0f}KB  {entry.name}")
+        click.echo(f"\n{len(matches)} sound file(s)")
+        return
+
+    convert = not raw
+    if convert and not check_ffmpeg():
+        click.echo("Warning: ffmpeg not found on PATH. Saving raw .xwm files (use --raw to suppress this warning).")
+        convert = False
+
+    def _progress(current: int, total: int) -> None:
+        click.echo(f"\rExtracting sounds... {current}/{total}", nl=False)
+
+    t0 = time.perf_counter()
+    result = extractor.extract_sounds(
+        output_dir, filter_pattern=filter_pattern, convert=convert,
+        progress_callback=_progress,
+    )
+    elapsed = time.perf_counter() - t0
+
+    click.echo()  # newline after progress
+    click.echo(f"Extracted: {result.extracted}  Converted: {result.converted}  "
+               f"Errors: {result.errors}  Time: {elapsed:.1f}s")

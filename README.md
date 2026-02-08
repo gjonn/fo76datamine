@@ -10,6 +10,7 @@ A Python CLI tool that parses Fallout 76's game data files (`SeventySix.esm` + l
 - **Versioned snapshots** - Stores each parse in SQLite with SHA-256 hashes for change detection
 - **Diff engine** - Compares snapshots to find added, removed, and modified records with field-level detail (e.g., "damage: 50.0 -> 65.0")
 - **Unreleased content detection** - Heuristic scan for Atomic Shop items (ATX_), cut/test content (zzz_/CUT_/TEST_), high FormIDs, and disabled quests
+- **Sound extraction** - Extracts `.xwm`, `.fuz`, and `.wav` audio from Sound BA2 archives, with optional xWMA-to-WAV conversion via ffmpeg
 - **Item image extraction** - Extracts actual item textures from BA2 archives: workshop icons (3700+) and model diffuse textures via a NIF → BGSM → DDS pipeline
 - **HTML output with inline images** - Dark-themed HTML reports with clickable icon thumbnails that expand to full resolution in a lightbox
 - **Search** - Query by item name, editor ID, FormID, or record type
@@ -20,6 +21,8 @@ A Python CLI tool that parses Fallout 76's game data files (`SeventySix.esm` + l
 - Python 3.10+
 - click (installed automatically)
 - Pillow (installed automatically, used for DDS to PNG conversion)
+- tomli (installed automatically for Python < 3.11, used for config file parsing)
+- ffmpeg (optional, for xWMA-to-WAV sound conversion — install separately)
 
 ## Installation
 
@@ -190,6 +193,7 @@ fo76dm search "Fixer" --format html -o search.html
 
 ```
 fo76dm show 0x00004822
+fo76dm show 0x00004822 --expand   # expand leveled list entries into a tree
 ```
 
 ```
@@ -257,6 +261,35 @@ fo76dm clear --yes   # skip confirmation
 ```
 
 Deletes every snapshot and all related data (records, decoded fields, strings, keywords, subrecords, diffs) from the database.
+
+### Extract sounds
+
+List all sound files in the archives:
+
+```
+fo76dm sounds --list-only
+```
+
+Filter by path fragment or glob:
+
+```
+fo76dm sounds --filter music --list-only
+fo76dm sounds --filter "sound/fx/wpn/*.xwm" --list-only
+```
+
+Extract and convert to WAV (requires ffmpeg):
+
+```
+fo76dm sounds --filter music -o music_out
+```
+
+Extract raw `.xwm` files without conversion:
+
+```
+fo76dm sounds --raw --filter music
+```
+
+`.fuz` files (voice lines with lip-sync data) are automatically stripped to their audio portion before conversion. If ffmpeg is not installed, a warning is printed and raw `.xwm` files are saved instead.
 
 ## Configuration
 
@@ -343,6 +376,6 @@ Custom pure-Python parser for Fallout 76's ESM format (version 208). No external
 - **Compression**: zlib for records with flag `0x00040000` (mainly NPC_ records)
 - **Skipped types**: REFR (5.1M placement refs), NAVM, ACHR - not useful for datamining
 - **Localization**: Strings stored in separate `.strings`/`.dlstrings`/`.ilstrings` files inside the Localization BA2 archive (BTDX v1 GNRL format)
-- **BA2 formats**: GNRL (general files — meshes, materials, workshop icons) and DX10 (textures with chunk-based mip levels and zlib compression)
+- **BA2 formats**: GNRL (general files — meshes, materials, workshop icons, sounds) and DX10 (textures with chunk-based mip levels and zlib compression)
 - **NIF parsing**: Reads Gamebryo NIF headers (version 20.2.0.7, BS stream 155) to extract material paths from the string table
 - **BGSM parsing**: Reads Bethesda material files to extract the diffuse texture path (first length-prefixed string after the 60-byte header)
