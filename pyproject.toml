@@ -7,11 +7,22 @@ name = "fo76datamine"
 version = "0.1.0"
 description = "Fallout 76 datamining tool - parse ESM, track changes, find unreleased content"
 requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "gjonn"}]
+readme = "README.md"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "click>=8.0",
     "Pillow>=9.2",
     "tomli>=1.0; python_version < '3.11'",
 ]
+
+[project.urls]
+Repository = "https://github.com/gjonn/fo76datamine"
 
 [project.scripts]
 fo76dm = "fo76datamine.cli:cli"
