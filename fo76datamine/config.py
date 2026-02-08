@@ -25,6 +25,17 @@ def derive_texture_ba2_paths(esm: Path) -> list[Path]:
     return paths
 
 
+def derive_sounds_ba2_paths(esm: Path) -> list[Path]:
+    """Return all existing SeventySix - Sounds*.ba2 paths in the Data directory."""
+    data_dir = esm.parent
+    paths = []
+    for i in range(1, 11):
+        p = data_dir / f"SeventySix - Sounds{i:02d}.ba2"
+        if p.exists():
+            paths.append(p)
+    return paths
+
+
 def derive_mesh_ba2_paths(esm: Path) -> list[Path]:
     """Return existing mesh BA2 paths (Meshes, MeshesExtra, UpdateMain)."""
     data_dir = esm.parent
